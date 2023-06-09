@@ -23,12 +23,16 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.KryoSerializable;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 
 import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.UTF8StringBuilder;
@@ -99,6 +103,31 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
   private static final UTF8String COMMA_UTF8 = UTF8String.fromString(",");
   public static final UTF8String EMPTY_UTF8 = UTF8String.fromString("");
 
+  private static int UPPER_LOWER_CASE_CACHE_SIZE = 1024;
+  private static int UPPER_LOWER_CASE_CACHE_BYTE_LIMIT = 1024;
+
+  private static final LoadingCache<UTF8String, UTF8String> upperCaseCache;
+
+  static {
+    upperCaseCache = CacheBuilder.newBuilder()
+      .maximumSize(UPPER_LOWER_CASE_CACHE_SIZE)
+      .build(new CacheLoader<UTF8String, UTF8String>() {
+        @Override
+          public UTF8String load(UTF8String key) {
+            return key.toUpperCaseInternal();
+          }
+      });
+  }
+
+  private static final LoadingCache<UTF8String, UTF8String> lowerCaseCache =
+    CacheBuilder.newBuilder()
+      .maximumSize(UPPER_LOWER_CASE_CACHE_SIZE)
+      .build(new CacheLoader<UTF8String, UTF8String>() {
+        @Override
+        public UTF8String load(UTF8String key) {
+          return key.toLowerCaseInternal();
+        }
+      });;
   /**
    * Creates an UTF8String from byte array, which should be encoded in UTF-8.
    *
@@ -362,6 +391,18 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
       return EMPTY_UTF8;
     }
 
+    if (numBytes >= UPPER_LOWER_CASE_CACHE_BYTE_LIMIT) {
+      return toUpperCaseInternal();
+    } else {
+      try {
+        return upperCaseCache.get(this);
+      } catch (ExecutionException e) {
+        return toUpperCaseInternal();
+      }
+    }
+  }
+
+  private UTF8String toUpperCaseInternal() {
     byte[] bytes = new byte[numBytes];
     bytes[0] = (byte) Character.toTitleCase(getByte(0));
     for (int i = 0; i < numBytes; i++) {
@@ -392,6 +433,18 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
       return EMPTY_UTF8;
     }
 
+    if (numBytes >= UPPER_LOWER_CASE_CACHE_BYTE_LIMIT) {
+      return toLowerCaseInternal();
+    } else {
+      try {
+        return lowerCaseCache.get(this);
+      } catch (ExecutionException e) {
+        return toLowerCaseInternal();
+      }
+    }
+  }
+
+  private UTF8String toLowerCaseInternal() {
     byte[] bytes = new byte[numBytes];
     bytes[0] = (byte) Character.toTitleCase(getByte(0));
     for (int i = 0; i < numBytes; i++) {
