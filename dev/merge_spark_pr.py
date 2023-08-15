@@ -56,7 +56,7 @@ JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD", "")
 # If it is configured, username and password are dismissed
 # Go to https://issues.apache.org/jira/secure/ViewProfile.jspa -> Personal Access Tokens for
 # your own token management.
-JIRA_ACCESS_TOKEN = os.environ.get("JIRA_ACCESS_TOKEN")
+JIRA_ACCESS_TOKEN = os.environ.get("JIRA_ACCESS_TOKEN", "")
 # OAuth key used for issuing requests against the GitHub API. If this is not defined, then requests
 # will be unauthenticated. You should only need to configure this if you find yourself regularly
 # exceeding your IP's unauthenticated request rate limit. You can create an OAuth key at
@@ -245,7 +245,7 @@ def cherry_pick(pr_num, merge_hash, default_branch):
 def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
     jira_server = {"server": JIRA_API_BASE}
 
-    if JIRA_ACCESS_TOKEN is not None:
+    if JIRA_ACCESS_TOKEN:
         asf_jira = jira.client.JIRA(jira_server, token_auth=JIRA_ACCESS_TOKEN)
     else:
         asf_jira = jira.client.JIRA(jira_server, basic_auth=(JIRA_USERNAME, JIRA_PASSWORD))
@@ -494,8 +494,8 @@ def main():
     original_head = get_current_ref()
 
     # Check this up front to avoid failing the JIRA update at the very end
-    if not JIRA_USERNAME or not JIRA_PASSWORD:
-        continue_maybe("The env-vars JIRA_USERNAME and/or JIRA_PASSWORD are not set. Continue?")
+    if not JIRA_ACCESS_TOKEN and (not JIRA_USERNAME or not JIRA_PASSWORD):
+        continue_maybe("The env-vars JIRA_ACCESS_TOKEN or JIRA_USERNAME/JIRA_PASSWORD are not set. Continue?")
 
     branches = get_json("%s/branches" % GITHUB_API_BASE)
     branch_names = list(filter(lambda x: x.startswith("branch-"), [x["name"] for x in branches]))
@@ -595,7 +595,7 @@ def main():
         merged_refs = merged_refs + [cherry_pick(pr_num, merge_hash, latest_branch)]
 
     if JIRA_IMPORTED:
-        if JIRA_USERNAME and JIRA_PASSWORD:
+        if JIRA_ACCESS_TOKEN or (JIRA_USERNAME and JIRA_PASSWORD):
             continue_maybe("Would you like to update an associated JIRA?")
             jira_comment = "Issue resolved by pull request %s\n[%s/%s]" % (
                 pr_num,
@@ -604,7 +604,7 @@ def main():
             )
             resolve_jira_issues(title, merged_refs, jira_comment)
         else:
-            print("JIRA_USERNAME and JIRA_PASSWORD not set")
+            print("Neither JIRA_ACCESS_TOKEN nor JIRA_USERNAME/JIRA_PASSWORD are set")
             print("Exiting without trying to close the associated JIRA.")
     else:
         print("Could not find jira-python library. Run 'pip3 install jira' to install.")
