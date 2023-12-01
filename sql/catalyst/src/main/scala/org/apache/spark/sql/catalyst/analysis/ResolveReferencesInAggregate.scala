@@ -59,8 +59,6 @@ class ResolveReferencesInAggregate(val catalogManager: CatalogManager) extends S
       case _ => a
     }
 
-    val resolvedGroupExprsBasic = a.groupingExpressions
-      .map(resolveExpressionByPlanChildren(_, planForResolve))
     val resolvedAggExprsBasic = a.aggregateExpressions.map(
       resolveExpressionByPlanChildren(_, planForResolve))
     val resolvedAggExprsWithLCA = resolveLateralColumnAlias(resolvedAggExprsBasic)
@@ -72,9 +70,12 @@ class ResolveReferencesInAggregate(val catalogManager: CatalogManager) extends S
     // needed as `aggregateExpressions` may rely on `groupingExpressions` as well, for the session
     // window feature. See the rule `SessionWindowing` for more details.
     val resolvedGroupExprs = if (resolvedAggExprsFinal.forall(_.resolved)) {
+      val resolvedByAlias = resolveGroupByAlias(resolvedAggExprsFinal, a.groupingExpressions)
+      val resolvedGroupExprsBasic =
+        resolvedByAlias.map(resolveExpressionByPlanChildren(_, planForResolve))
       val resolved = resolveGroupByAll(
         resolvedAggExprsFinal,
-        resolveGroupByAlias(resolvedAggExprsFinal, resolvedGroupExprsBasic)
+        resolvedGroupExprsBasic
       ).map(resolveColsLastResort)
       // TODO: currently we don't support LCA in `groupingExpressions` yet.
       if (resolved.exists(_.containsPattern(LATERAL_COLUMN_ALIAS_REFERENCE))) {
@@ -89,7 +90,7 @@ class ResolveReferencesInAggregate(val catalogManager: CatalogManager) extends S
       // alias/ALL in the next iteration. If aggregate expressions end up as unresolved, we don't
       // need to resolve grouping expressions at all, as `CheckAnalysis` will report error for
       // aggregate expressions first.
-      resolvedGroupExprsBasic
+      a.groupingExpressions.map(resolveExpressionByPlanChildren(_, planForResolve))
     }
     a.copy(
       // The aliases in grouping expressions are useless and will be removed at the end of analysis
