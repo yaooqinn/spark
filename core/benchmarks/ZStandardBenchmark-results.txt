@@ -4,46 +4,59 @@ Benchmark ZStandardCompressionCodec
 
 OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
 Apple M2 Max
-Benchmark ZStandardCompressionCodec:                   Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
--------------------------------------------------------------------------------------------------------------------------------------
-Compression 1000 times at level 1 without buffer pool            741            823          71          0.0      741053.0       1.0X
-Compression 1000 times at level 2 without buffer pool            889            894           6          0.0      889350.8       0.8X
-Compression 1000 times at level 3 without buffer pool            921            926           4          0.0      921417.6       0.8X
-Compression 1000 times at level 1 with buffer pool               285            286           2          0.0      284556.5       2.6X
-Compression 1000 times at level 2 with buffer pool               310            314           3          0.0      309613.3       2.4X
-Compression 1000 times at level 3 with buffer pool               340            345           5          0.0      339576.3       2.2X
+Benchmark ZStandardCompressionCodec:                    Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+--------------------------------------------------------------------------------------------------------------------------------------
+Compression 10000 times at level 1 without buffer pool            503            506           4          0.0       50277.2       1.0X
+Compression 10000 times at level 2 without buffer pool            695            700           8          0.0       69479.9       0.7X
+Compression 10000 times at level 3 without buffer pool            949            963          24          0.0       94917.9       0.5X
+Compression 10000 times at level 1 with buffer pool               482            485           3          0.0       48218.2       1.0X
+Compression 10000 times at level 2 with buffer pool               671            676           7          0.0       67147.9       0.7X
+Compression 10000 times at level 3 with buffer pool               892            905          13          0.0       89221.0       0.6X
 
 OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
 Apple M2 Max
-Benchmark ZStandardCompressionCodec:                       Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
------------------------------------------------------------------------------------------------------------------------------------------
-Decompression 1000 times from level 1 without buffer pool             28             37           4          0.0       28449.1       1.0X
-Decompression 1000 times from level 2 without buffer pool             24             36           4          0.0       23884.8       1.2X
-Decompression 1000 times from level 3 without buffer pool             54             56           2          0.0       53533.1       0.5X
-Decompression 1000 times from level 1 with buffer pool                22             31           4          0.0       22191.3       1.3X
-Decompression 1000 times from level 2 with buffer pool                22             29           5          0.0       21939.4       1.3X
-Decompression 1000 times from level 3 with buffer pool                35             53           7          0.0       35338.7       0.8X
+Benchmark ZStandardCompressionCodec:                        Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------------------------
+Decompression 10000 times from level 1 without buffer pool            108            122           6          0.1       10833.2       1.0X
+Decompression 10000 times from level 2 without buffer pool            138            157          13          0.1       13808.1       0.8X
+Decompression 10000 times from level 3 without buffer pool            103            166          45          0.1       10296.8       1.1X
+Decompression 10000 times from level 1 with buffer pool                49             97          38          0.2        4850.6       2.2X
+Decompression 10000 times from level 2 with buffer pool                65            145          36          0.2        6546.3       1.7X
+Decompression 10000 times from level 3 with buffer pool               262            298          26          0.0       26185.0       0.4X
 
 OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
 Apple M2 Max
 Parallel Compression at level 3:          Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Parallel Compression with 0 workers                  30             31           1          0.0      232765.3       1.0X
-Parallel Compression with 1 workers                  20             21           1          0.0      155861.3       1.5X
-Parallel Compression with 2 workers                  20             21           1          0.0      155699.5       1.5X
-Parallel Compression with 4 workers                  23             24           1          0.0      179320.3       1.3X
-Parallel Compression with 8 workers                  24             25           1          0.0      191200.9       1.2X
-Parallel Compression with 16 workers                 28             29           1          0.0      217928.1       1.1X
+Parallel Compression with 0 workers                  29             31           1          0.0      229354.2       1.0X
+Parallel Compression with 1 workers                  20             21           1          0.0      154350.9       1.5X
+Parallel Compression with 2 workers                  20             22           1          0.0      154693.4       1.5X
+Parallel Compression with 4 workers                  23             24           1          0.0      177223.0       1.3X
+Parallel Compression with 8 workers                  25             25           1          0.0      191583.3       1.2X
+Parallel Compression with 16 workers                 28             30           1          0.0      219090.5       1.0X
 
 OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
 Apple M2 Max
 Parallel Compression at level 9:          Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Parallel Compression with 0 workers                  86             88           1          0.0      673212.9       1.0X
-Parallel Compression with 1 workers                 115            116           0          0.0      901162.1       0.7X
-Parallel Compression with 2 workers                  62             63           0          0.0      485396.8       1.4X
-Parallel Compression with 4 workers                  39             40           1          0.0      304493.5       2.2X
-Parallel Compression with 8 workers                  37             40           1          0.0      290012.7       2.3X
-Parallel Compression with 16 workers                 43             45           2          0.0      333072.9       2.0X
+Parallel Compression with 0 workers                  85             86           1          0.0      665944.0       1.0X
+Parallel Compression with 1 workers                 113            115           1          0.0      885169.3       0.8X
+Parallel Compression with 2 workers                  62             63           0          0.0      485031.6       1.4X
+Parallel Compression with 4 workers                  39             41           2          0.0      303355.8       2.2X
+Parallel Compression with 8 workers                  38             40           1          0.0      296907.2       2.2X
+Parallel Compression with 16 workers                 42             44           1          0.0      331843.4       2.0X
 
+OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
+Apple M2 Max
+Heap vs OffHeap Compression at level 3:   Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------
+Compression on OFF HEAP                            1031           1064          47          0.0     8058572.9       1.0X
+Compression on HEAP                                 972           1012          57          0.0     7592381.5       1.1X
+
+OpenJDK 64-Bit Server VM 17.0.9+0 on Mac OS X 14.1.2
+Apple M2 Max
+Heap vs OffHeap Compression at level 9:   Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------
+Compression on OFF HEAP                            5369           5500         186          0.0    41941845.4       1.0X
+Compression on HEAP                                5333           5451         166          0.0    41667682.9       1.0X
 

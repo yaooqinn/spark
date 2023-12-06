@@ -23,7 +23,7 @@ import com.github.luben.zstd.ZstdInputStreamNoFinalizer
 
 import org.apache.spark.SparkConf
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
-import org.apache.spark.internal.config.{IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED, IO_COMPRESSION_ZSTD_BUFFERSIZE, IO_COMPRESSION_ZSTD_LEVEL, IO_COMPRESSION_ZSTD_WORKERS}
+import org.apache.spark.internal.config.{IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED, IO_COMPRESSION_ZSTD_BUFFERPOOL_OFFHEAP_ENABLED, IO_COMPRESSION_ZSTD_BUFFERSIZE, IO_COMPRESSION_ZSTD_LEVEL, IO_COMPRESSION_ZSTD_WORKERS}
 
 
 /**
@@ -38,9 +38,9 @@ import org.apache.spark.internal.config.{IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED,
  */
 object ZStandardBenchmark extends BenchmarkBase {
 
-  val N = 1000
+  val N = 10000
   // 32k * 4 = 128k
-  val numInteger = IO_COMPRESSION_ZSTD_BUFFERSIZE.defaultValue.get.toInt * 4
+  val numInteger = IO_COMPRESSION_ZSTD_BUFFERSIZE.defaultValue.get.toInt / 4
 
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val name = "Benchmark ZStandardCompressionCodec"
@@ -53,6 +53,7 @@ object ZStandardBenchmark extends BenchmarkBase {
       decompressionBenchmark(benchmark2, N)
       benchmark2.run()
       parallelCompressionBenchmark()
+      heapOffHeapCompressionBenchmark()
     }
   }
 
@@ -127,6 +128,31 @@ object ZStandardBenchmark extends BenchmarkBase {
             oos.writeObject(data)
           }
           oos.close()
+        }
+      }
+      benchmark.run()
+    }
+  }
+
+  private def heapOffHeapCompressionBenchmark(): Unit = {
+
+    Seq(3, 9, 22).foreach { level =>
+      val benchmark = new Benchmark(
+        s"Heap vs OffHeap Compression at level $level", N, output = output)
+      Seq(true, false).foreach { useOffHeap =>
+        val conf = new SparkConf(false)
+          .set(IO_COMPRESSION_ZSTD_LEVEL, level)
+          .set(IO_COMPRESSION_ZSTD_BUFFERPOOL_OFFHEAP_ENABLED, useOffHeap)
+        val mem = if (useOffHeap) { "OFF HEAP" } else { "HEAP" }
+        benchmark.addCase(s"Compression on $mem ") { _ =>
+          (1 until N).foreach { _ =>
+            val os = new ZStdCompressionCodec(conf)
+              .compressedOutputStream(new ByteArrayOutputStream())
+            for (i <- 1 until numInteger) {
+              os.write(i)
+            }
+            os.close()
+          }
         }
       }
       benchmark.run()

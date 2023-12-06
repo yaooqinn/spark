@@ -228,6 +228,11 @@ class ZStdCompressionCodec(conf: SparkConf) extends CompressionCodec {
   private val level = conf.get(IO_COMPRESSION_ZSTD_LEVEL)
 
   private val bufferPool = if (conf.get(IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED)) {
+    if (conf.get(IO_COMPRESSION_ZSTD_BUFFERPOOL_OFFHEAP_ENABLED)) {
+      OffHeapRecyclingBufferPool.INSTANCE
+    } else {
+      RecyclingBufferPool.INSTANCE
+    }
     RecyclingBufferPool.INSTANCE
   } else {
     NoPool.INSTANCE

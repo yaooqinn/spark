@@ -1910,6 +1910,13 @@ package object config {
       .booleanConf
       .createWithDefault(true)
 
+  private[spark] val IO_COMPRESSION_ZSTD_BUFFERPOOL_OFFHEAP_ENABLED =
+    ConfigBuilder("spark.io.compression.zstd.bufferPool.offHeap.enabled")
+      .doc("If true, using off heap memory to allocate buffer pool of ZSTD JNI library.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(true)
+
   private[spark] val IO_COMPRESSION_ZSTD_WORKERS =
     ConfigBuilder("spark.io.compression.zstd.workers")
       .doc("Thread size spawned to compress in parallel when using Zstd. When the value is 0, " +
