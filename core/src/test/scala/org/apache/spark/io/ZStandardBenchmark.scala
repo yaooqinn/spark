@@ -19,6 +19,8 @@ package org.apache.spark.io
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectOutputStream}
 
+import com.github.luben.zstd.ZstdInputStreamNoFinalizer
+
 import org.apache.spark.SparkConf
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
 import org.apache.spark.internal.config.{IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED, IO_COMPRESSION_ZSTD_BUFFERSIZE, IO_COMPRESSION_ZSTD_LEVEL, IO_COMPRESSION_ZSTD_WORKERS}
@@ -36,8 +38,9 @@ import org.apache.spark.internal.config.{IO_COMPRESSION_ZSTD_BUFFERPOOL_ENABLED,
  */
 object ZStandardBenchmark extends BenchmarkBase {
 
-  val N = 10000
-  val numInteger = IO_COMPRESSION_ZSTD_BUFFERSIZE.defaultValue.get.toInt / 4
+  val N = 1000
+  // 32k * 4 = 128k
+  val numInteger = IO_COMPRESSION_ZSTD_BUFFERSIZE.defaultValue.get.toInt * 4
 
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val name = "Benchmark ZStandardCompressionCodec"
@@ -88,13 +91,15 @@ object ZStandardBenchmark extends BenchmarkBase {
         out.close()
         val bytes = outputStream.toByteArray
 
+        val dSize = ZstdInputStreamNoFinalizer.recommendedDInSize().toInt
+
         val condition = if (enablePool) "with" else "without"
         benchmark.addCase(s"Decompression $N times from level $level $condition buffer pool") { _ =>
           (1 until N).foreach { _ =>
             val bais = new ByteArrayInputStream(bytes)
             val is = new ZStdCompressionCodec(conf).compressedInputStream(bais)
-            for (i <- 1 until numInteger) {
-              is.read()
+            while (is.available() > 0) {
+              is.readNBytes(dSize)
             }
             is.close()
           }
