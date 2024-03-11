@@ -242,6 +242,7 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
   test("SPARK-43040: timestamp_ntz read test") {
     val df1 = sql("select timestamp_ntz'2018-11-17 13:33:33' as col0")
     df1.write
+      .format("jdbc")
       .option("url", jdbcUrl)
       .option("dbtable", "timestamp_ntz")
       .mode(SaveMode.Overwrite)
