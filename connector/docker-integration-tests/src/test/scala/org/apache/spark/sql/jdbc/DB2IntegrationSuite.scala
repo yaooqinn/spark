@@ -241,10 +241,9 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
   }
 
   test("SPARK-43040: timestamp_ntz read test") {
-    val prop = new Properties
-    prop.setProperty("preferTimestampNTZ", "true")
     val df = spark.read.format("jdbc")
       .option("url", jdbcUrl)
+      .option("preferTimestampNTZ", "true")
       .option("query", "SELECT ts from dates").load()
     checkAnswer(df, Row(LocalDateTime.of(2009, 2, 13, 23, 31, 30)))
   }
