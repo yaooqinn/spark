@@ -19,6 +19,7 @@ package org.apache.spark.sql.jdbc
 
 import java.math.BigDecimal
 import java.sql.{Connection, Date, Timestamp}
+import java.time.LocalDateTime
 import java.util.Properties
 
 import org.scalatest.time.SpanSugar._
@@ -237,5 +238,14 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
       .collect()
 
     assert(actual === expected)
+  }
+
+  test("SPARK-43040: timestamp_ntz read test") {
+    val prop = new Properties
+    prop.setProperty("preferTimestampNTZ", "true")
+    val df = spark.read.format("jdbc")
+      .option("url", jdbcUrl)
+      .option("query", "SELECT ts from dates").load()
+    checkAnswer(df, Row(LocalDateTime.of(2009, 2, 13, 23, 31, 30)))
   }
 }
