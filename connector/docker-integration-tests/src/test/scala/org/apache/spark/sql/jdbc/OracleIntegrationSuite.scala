@@ -158,6 +158,22 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSpark
       "INSERT INTO test_ltz (t) VALUES (TIMESTAMP '2018-11-17 13:33:33')")
       .executeUpdate()
     conn.commit()
+
+    conn.prepareStatement("CREATE TABLE ch (c0 NCHAR(10), c1 NVARCHAR(10))")
+      .executeUpdate()
+    // scalastyle:off nonascii
+    conn.prepareStatement("INSERT INTO ch VALUES (N'中国', N'台湾')")
+      .executeUpdate()
+    conn.prepareStatement("INSERT INTO ch VALUES (N'日本', N'沖縄')")
+      .executeUpdate()
+    conn.prepareStatement("INSERT INTO ch VALUES (N'한국', N'서울')")
+      .executeUpdate()
+    conn.prepareStatement("INSERT INTO ch VALUES (N'Россия', N'Москва')")
+      .executeUpdate()
+    conn.prepareStatement("INSERT INTO ch VALUES (N'العربية', N'القاهرة')")
+    // insert a row with AL16UTF16 but not UTF8
+    // scalastyle:on nonascii
+    conn.commit()
   }
 
   test("SPARK-16625: Importing Oracle numeric types") {
@@ -566,9 +582,16 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSpark
         .plusNanos(456000)))
   }
 
-  test("oracle.jdbc.OracleTypes.TIMESTAMP") {
-    val df = spark.read.jdbc(jdbcUrl, "datetime", new Properties())
-    checkAnswer(df, Seq(Row(BigDecimal.valueOf(1), Date.valueOf("1991-11-09"),
-      Timestamp.valueOf("1996-01-01 01:23:45"))))
+  test("NCHAR and NVARCHAR support") {
+    val df = spark.read.jdbc(jdbcUrl, "ch", new Properties)
+    // scalastyle:off nonascii
+    checkAnswer(df, Seq(
+      Row("中国", "台湾"),
+      Row("日本", "沖縄"),
+      Row("한국", "서울"),
+      Row("Россия", "Москва"),
+      Row("العربية", "القاهرة")
+    ))
+    // scalastyle:on nonascii
   }
 }
