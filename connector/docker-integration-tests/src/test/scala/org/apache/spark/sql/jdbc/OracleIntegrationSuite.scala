@@ -159,7 +159,7 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSpark
       .executeUpdate()
     conn.commit()
 
-    conn.prepareStatement("CREATE TABLE ch (c0 NCHAR(10), c1 NVARCHAR2(10))")
+    conn.prepareStatement("CREATE TABLE ch (c0 NVARCHAR2(100), c1 NVARCHAR2(100))")
       .executeUpdate()
     // scalastyle:off nonascii
     conn.prepareStatement("INSERT INTO ch VALUES (N'中国', N'台湾')")
