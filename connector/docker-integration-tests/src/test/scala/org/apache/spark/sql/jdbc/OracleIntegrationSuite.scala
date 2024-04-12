@@ -565,4 +565,10 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSpark
       Row(Duration.ofDays(1).plusHours(12).plusMinutes(23).plusSeconds(56).plusMillis(123)
         .plusNanos(456000)))
   }
+
+  test("oracle.jdbc.OracleTypes.TIMESTAMP") {
+    val df = spark.read.jdbc(jdbcUrl, "datetime", new Properties())
+    checkAnswer(df, Seq(Row(BigDecimal.valueOf(1), Date.valueOf("1991-11-09"),
+      Timestamp.valueOf("1996-01-01 01:23:45"))))
+  }
 }
