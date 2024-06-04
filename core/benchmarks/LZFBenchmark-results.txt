@@ -6,14 +6,14 @@ OpenJDK 64-Bit Server VM 17.0.10+0 on Mac OS X 14.5
 Apple M2 Max
 Compress small objects:                           Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 --------------------------------------------------------------------------------------------------------------------------------
-Compression 256000000 int values single-threaded            523            527           3        489.1           2.0       1.0X
-Compression 256000000 int values in parallel                538            543           5        475.8           2.1       1.0X
+Compression 256000000 int values in parallel                543            545           1        471.3           2.1       1.0X
+Compression 256000000 int values single-threaded            521            523           1        491.0           2.0       1.0X
 
 OpenJDK 64-Bit Server VM 17.0.10+0 on Mac OS X 14.5
 Apple M2 Max
-Compress large objects:                       Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
-----------------------------------------------------------------------------------------------------------------------------
-Compression 128 array values single-threaded             92             93           2          0.0      718374.0       1.0X
-Compression 128 array values in parallel                 40             42           2          0.0      309032.5       2.3X
+Compress large objects:                        Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+-----------------------------------------------------------------------------------------------------------------------------
+Compression 1024 array values in 9 threads                13             14           0          0.1       12589.5       1.0X
+Compression 1024 array values single-threaded             23             24           0          0.0       22664.6       0.6X
 
 

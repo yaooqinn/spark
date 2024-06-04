@@ -171,8 +171,8 @@ class LZ4CompressionCodec(conf: SparkConf) extends CompressionCodec {
  */
 @DeveloperApi
 class LZFCompressionCodec(conf: SparkConf) extends CompressionCodec {
-
   private val parallelCompression = conf.get(IO_COMPRESSION_LZF_PARALLEL)
+
   override def compressedOutputStream(s: OutputStream): OutputStream = {
     if (parallelCompression) {
       new PLZFOutputStream(s)

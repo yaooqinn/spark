@@ -18,6 +18,7 @@
 package org.apache.spark.io
 
 import java.io.{ByteArrayOutputStream, ObjectOutputStream}
+import java.lang.management.ManagementFactory
 
 import org.apache.spark.SparkConf
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
@@ -45,7 +46,7 @@ object LZFBenchmark extends BenchmarkBase {
   private def compressSmallObjects(): Unit = {
     val N = 256_000_000
     val benchmark = new Benchmark("Compress small objects", N, output = output)
-    Seq(false, true).foreach { parallel =>
+    Seq(true, false).foreach { parallel =>
       val conf = new SparkConf(false).set(IO_COMPRESSION_LZF_PARALLEL, parallel)
       val condition = if (parallel) "in parallel" else "single-threaded"
       benchmark.addCase(s"Compression $N int values $condition") { _ =>
@@ -60,13 +61,23 @@ object LZFBenchmark extends BenchmarkBase {
   }
 
   private def compressLargeObjects(): Unit = {
-    val N = 128
-    val data: Array[Byte] = (1 until 512 * 1024 * 1024).map(_.toByte).toArray
+    val N = 1024
+    val data: Array[Byte] = (1 until 128 * 1024 * 1024).map(_.toByte).toArray
     val benchmark = new Benchmark(s"Compress large objects", N, output = output)
 
-    Seq(false, true).foreach { parallel =>
+    // com.ning.compress.lzf.parallel.PLZFOutputStream.getNThreads
+    def getNThreads: Int = {
+      var nThreads = Runtime.getRuntime.availableProcessors
+      val jmx = ManagementFactory.getOperatingSystemMXBean
+      if (jmx != null)  {
+        val loadAverage = jmx.getSystemLoadAverage.toInt
+        if (nThreads > 1 && loadAverage >= 1)  nThreads = Math.max(1, nThreads - loadAverage)
+      }
+      nThreads
+    }
+    Seq(true, false).foreach { parallel =>
       val conf = new SparkConf(false).set(IO_COMPRESSION_LZF_PARALLEL, parallel)
-      val condition = if (parallel) "in parallel" else "single-threaded"
+      val condition = if (parallel) s"in $getNThreads threads" else "single-threaded"
       benchmark.addCase(s"Compression $N array values $condition") { _ =>
         val baos = new ByteArrayOutputStream()
         val zcos = new LZFCompressionCodec(conf).compressedOutputStream(baos)
