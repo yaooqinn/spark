@@ -18,6 +18,7 @@
 package org.apache.spark.sql.catalyst.catalog
 
 import java.net.URI
+import java.util.HexFormat
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -81,33 +82,35 @@ object ExternalCatalogUtils {
     builder.toString()
   }
 
-
   def unescapePathName(path: String): String = {
-    val sb = new StringBuilder
-    var i = 0
-
-    while (i < path.length) {
-      val c = path.charAt(i)
-      if (c == '%' && i + 2 < path.length) {
-        val code: Int = try {
-          Integer.parseInt(path.substring(i + 1, i + 3), 16)
+    var nextPercentSigh = path.indexOf('%')
+    val length = path.length
+    if (nextPercentSigh == -1 || nextPercentSigh + 2 > path.length) {
+      // fast path, no %xx encoding found then retrun the string identity
+      path
+    } else {
+      val sb = new java.lang.StringBuilder(length)
+      var fromIndex = 0
+      while(nextPercentSigh != -1 && nextPercentSigh + 2 < length) {
+        if (nextPercentSigh > fromIndex) sb.append(path, fromIndex, nextPercentSigh)
+        val c = path.charAt(nextPercentSigh)
+        val i = nextPercentSigh + 1
+        val j = nextPercentSigh + 3
+        try {
+          sb.append(HexFormat.fromHexDigits(path, i, j).asInstanceOf[Char])
+          fromIndex = j
         } catch {
-          case _: Exception => -1
+          case _: Exception =>
+            sb.append(c) // append '%'
+            fromIndex = i
         }
-        if (code >= 0) {
-          sb.append(code.asInstanceOf[Char])
-          i += 3
-        } else {
-          sb.append(c)
-          i += 1
-        }
-      } else {
-        sb.append(c)
-        i += 1
+        nextPercentSigh = path.indexOf('%', fromIndex)
       }
+      if (fromIndex < length) {
+        sb.append(path, fromIndex, length)
+      }
+      sb.toString
     }
-
-    sb.toString()
   }
 
   def generatePartitionPath(
