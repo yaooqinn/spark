@@ -53,12 +53,6 @@ private[hive] trait HiveClient {
    */
   def getState: Any
 
-  /**
-   * Runs a HiveQL command using Hive, returning the results as a list of strings.  Each row will
-   * result in one string.
-   */
-  def runSqlHive(sql: String): Seq[String]
-
   def setOut(stream: PrintStream): Unit
   def setInfo(stream: PrintStream): Unit
   def setError(stream: PrintStream): Unit

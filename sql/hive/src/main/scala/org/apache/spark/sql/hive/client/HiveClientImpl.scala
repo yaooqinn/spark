@@ -34,10 +34,8 @@ import org.apache.hadoop.hive.common.StatsSetupConst
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.metastore.{IMetaStoreClient, TableType => HiveTableType}
 import org.apache.hadoop.hive.metastore.api.{Database => HiveDatabase, Table => MetaStoreApiTable, _}
-import org.apache.hadoop.hive.ql.Driver
 import org.apache.hadoop.hive.ql.metadata.{Hive, HiveException, Partition => HivePartition, Table => HiveTable}
 import org.apache.hadoop.hive.ql.parse.BaseSemanticAnalyzer.HIVE_COLUMN_ORDER_ASC
-import org.apache.hadoop.hive.ql.processors._
 import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.serde.serdeConstants
 import org.apache.hadoop.hive.serde2.MetadataTypedColumnsetSerDe
@@ -46,7 +44,7 @@ import org.apache.hadoop.security.UserGroupInformation
 
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil.SOURCE_SPARK
-import org.apache.spark.internal.{Logging, LogKeys, MDC}
+import org.apache.spark.internal.{Logging, MDC}
 import org.apache.spark.internal.LogKeys._
 import org.apache.spark.metrics.source.HiveCatalogMetrics
 import org.apache.spark.sql.catalyst.TableIdentifier
@@ -58,7 +56,6 @@ import org.apache.spark.sql.catalyst.parser.{CatalystSqlParser, ParseException}
 import org.apache.spark.sql.catalyst.util.CharVarcharUtils
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces._
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
-import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.hive.{HiveExternalCatalog, HiveUtils}
 import org.apache.spark.sql.hive.HiveExternalCatalog.DATASOURCE_SCHEMA
 import org.apache.spark.sql.internal.SQLConf
@@ -835,91 +832,6 @@ private[hive] class HiveClientImpl(
         getRawTablesByName(dbName, tableNames)
           .filter(_.getTableType == hiveTableType)
           .map(_.getTableName)
-    }
-  }
-
-  /**
-   * Runs the specified SQL query using Hive.
-   */
-  override def runSqlHive(sql: String): Seq[String] = {
-    val maxResults = 100000
-    val results = runHive(sql, maxResults)
-    // It is very confusing when you only get back some of the results...
-    if (results.size == maxResults) throw SparkException.internalError("RESULTS POSSIBLY TRUNCATED")
-    results
-  }
-
-  /**
-   * Execute the command using Hive and return the results as a sequence. Each element
-   * in the sequence is one row.
-   * Since upgrading the built-in Hive to 2.3, hive-llap-client is needed when
-   * running MapReduce jobs with `runHive`.
-   * Since HIVE-17626(Hive 3.0.0), need to set hive.query.reexecution.enabled=false.
-   */
-  protected def runHive(cmd: String, maxRows: Int = 1000): Seq[String] = withHiveState {
-    def closeDriver(driver: Driver): Unit = {
-      // Since HIVE-18238(Hive 3.0.0), the Driver.close function's return type changed
-      // and the CommandProcessorFactory.clean function removed.
-      driver.getClass.getMethod("close").invoke(driver)
-      if (version != hive.v3_0 && version != hive.v3_1) {
-        CommandProcessorFactory.clean(conf)
-      }
-    }
-
-    // Hive query needs to start SessionState.
-    SessionState.start(state)
-    logDebug(s"Running hiveql '$cmd'")
-    if (cmd.toLowerCase(Locale.ROOT).startsWith("set")) { logDebug(s"Changing config: $cmd") }
-    try {
-      val cmd_trimmed: String = cmd.trim()
-      val tokens: Array[String] = cmd_trimmed.split("\\s+")
-      // The remainder of the command.
-      val cmd_1: String = cmd_trimmed.substring(tokens(0).length()).trim()
-      val proc = shim.getCommandProcessor(tokens(0), conf)
-      proc match {
-        case driver: Driver =>
-          val response: CommandProcessorResponse = driver.run(cmd)
-          // Throw an exception if there is an error in query processing.
-          if (response.getResponseCode != 0) {
-            closeDriver(driver)
-            throw new QueryExecutionException(response.getErrorMessage)
-          }
-          driver.setMaxRows(maxRows)
-
-          val results = shim.getDriverResults(driver)
-          closeDriver(driver)
-          results
-
-        case _ =>
-          if (state.out != null) {
-            // scalastyle:off println
-            state.out.println(tokens(0) + " " + cmd_1)
-            // scalastyle:on println
-          }
-          val response: CommandProcessorResponse = proc.run(cmd_1)
-          // Throw an exception if there is an error in query processing.
-          if (response.getResponseCode != 0) {
-            throw new QueryExecutionException(response.getErrorMessage)
-          }
-          Seq(response.getResponseCode.toString)
-      }
-    } catch {
-      case e: Exception =>
-        logError(
-          log"""
-            |======================
-            |HIVE FAILURE OUTPUT
-            |======================
-            |${MDC(LogKeys.OUTPUT_BUFFER, outputBuffer.toString)}
-            |======================
-            |END HIVE FAILURE OUTPUT
-            |======================
-          """.stripMargin, e)
-        throw e
-    } finally {
-      if (state != null) {
-        state.close()
-      }
     }
   }
 

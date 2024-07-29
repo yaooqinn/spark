@@ -2209,7 +2209,7 @@ abstract class SQLQuerySuiteBase extends QueryTest with SQLTestUtils with TestHi
           HiveUtils.CONVERT_METASTORE_ORC.key -> value,
           HiveUtils.CONVERT_METASTORE_PARQUET.key -> value) {
           withTempDatabase { db =>
-            client.runSqlHive(
+            runSqlHive(
               s"""
                  |CREATE TABLE $db.t(
                  |  click_id string,
@@ -2221,7 +2221,7 @@ abstract class SQLQuerySuiteBase extends QueryTest with SQLTestUtils with TestHi
                  |STORED AS $format
               """.stripMargin)
 
-            client.runSqlHive(
+            runSqlHive(
               s"""
                  |INSERT INTO TABLE $db.t
                  |PARTITION (ts = '98765', hour = '01')
@@ -2233,7 +2233,7 @@ abstract class SQLQuerySuiteBase extends QueryTest with SQLTestUtils with TestHi
               sql(s"SELECT click_id, search_id, uid, ts, hour FROM $db.t"),
               Row("12", "2", 12345, "98765", "01"))
 
-            client.runSqlHive(s"ALTER TABLE $db.t ADD COLUMNS (dummy string)")
+            runSqlHive(s"ALTER TABLE $db.t ADD COLUMNS (dummy string)")
 
             checkAnswer(
               sql(s"SELECT click_id, search_id FROM $db.t"),
@@ -2507,14 +2507,14 @@ abstract class SQLQuerySuiteBase extends QueryTest with SQLTestUtils with TestHi
       val t1Loc = s"file:///$dir/t1"
       val t2Loc = s"file:///$dir/t2"
       withTable("t1", "t2") {
-        hiveClient.runSqlHive(
+        runSqlHive(
           s"create table t1(id int) partitioned by(pid int) stored as avro location '$t1Loc'")
-        hiveClient.runSqlHive("insert into t1 partition(pid=1) select 2")
-        hiveClient.runSqlHive(
+        runSqlHive("insert into t1 partition(pid=1) select 2")
+        runSqlHive(
           s"create table t2(id int) partitioned by(pid int) stored as textfile location '$t2Loc'")
-        hiveClient.runSqlHive("insert into t2 partition(pid=2) select 2")
-        hiveClient.runSqlHive(s"alter table t1 add partition (pid=2) location '$t2Loc/pid=2'")
-        hiveClient.runSqlHive("alter table t1 partition(pid=2) SET FILEFORMAT textfile")
+        runSqlHive("insert into t2 partition(pid=2) select 2")
+        runSqlHive(s"alter table t1 add partition (pid=2) location '$t2Loc/pid=2'")
+        runSqlHive("alter table t1 partition(pid=2) SET FILEFORMAT textfile")
         checkAnswer(sql("select pid, id from t1 order by pid"), Seq(Row(1, 2), Row(2, 2)))
       }
     }
@@ -2523,8 +2523,8 @@ abstract class SQLQuerySuiteBase extends QueryTest with SQLTestUtils with TestHi
   test("SPARK-36905: read hive views without without explicit column names") {
     withTable("t1") {
       withView("test_view") {
-        hiveClient.runSqlHive("create table t1 stored as avro as select 2 as id")
-        hiveClient.runSqlHive("create view test_view as select 1, id + 1 from t1")
+        runSqlHive("create table t1 stored as avro as select 2 as id")
+        runSqlHive("create view test_view as select 1, id + 1 from t1")
         checkAnswer(sql("select * from test_view"), Seq(Row(1, 3)))
       }
     }

@@ -575,7 +575,6 @@ private[spark] object LogKeys {
   case object OS_NAME extends LogKey
   case object OS_VERSION extends LogKey
   case object OUTPUT extends LogKey
-  case object OUTPUT_BUFFER extends LogKey
   case object OVERHEAD_MEMORY_SIZE extends LogKey
   case object PAGE_SIZE extends LogKey
   case object PARENT_STAGES extends LogKey

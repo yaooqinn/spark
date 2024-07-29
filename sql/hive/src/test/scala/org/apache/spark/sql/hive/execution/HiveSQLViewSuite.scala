@@ -23,7 +23,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.connector.catalog.CatalogManager.SESSION_CATALOG_NAME
 import org.apache.spark.sql.execution.SQLViewSuite
-import org.apache.spark.sql.hive.{HiveExternalCatalog, HiveUtils}
+import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.test.TestHiveSingleton
 import org.apache.spark.sql.types.{NullType, StructType}
 import org.apache.spark.tags.SlowHiveTest
@@ -201,7 +201,7 @@ class HiveSQLViewSuite extends SQLViewSuite with TestHiveSingleton {
              |  p2 STRING )
            """.stripMargin)
 
-        createRawHiveTable(
+        runSqlHive(
           s"""
              |CREATE VIEW v1
              |PARTITIONED ON (p1, p2)
@@ -231,10 +231,5 @@ class HiveSQLViewSuite extends SQLViewSuite with TestHiveSingleton {
         )
       }
     }
-  }
-
-  private def createRawHiveTable(ddl: String): Unit = {
-    hiveContext.sharedState.externalCatalog.unwrapped.asInstanceOf[HiveExternalCatalog]
-      .client.runSqlHive(ddl)
   }
 }

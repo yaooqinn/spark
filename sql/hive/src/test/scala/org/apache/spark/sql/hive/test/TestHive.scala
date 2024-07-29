@@ -560,12 +560,13 @@ private[hive] class TestHiveSparkSession(
       sessionState.conf.setConfString("fs.defaultFS", new File(".").toURI.toString)
       // It is important that we RESET first as broken hooks that might have been set could break
       // other sql exec here.
-      metadataHive.runSqlHive("RESET")
+      TestHiveSingleton.runSqlHive("RESET", metadataHive)
       // For some reason, RESET does not reset the following variables...
       // https://issues.apache.org/jira/browse/HIVE-9004
-      metadataHive.runSqlHive("set hive.table.parameters.default=")
+      TestHiveSingleton.runSqlHive("set hive.table.parameters.default=", metadataHive)
       // Lots of tests fail if we do not change the partition whitelist from the default.
-      metadataHive.runSqlHive("set hive.metastore.partition.name.whitelist.pattern=.*")
+      TestHiveSingleton
+        .runSqlHive("set hive.metastore.partition.name.whitelist.pattern=.*", metadataHive)
 
       sessionState.catalog.setCurrentDatabase("default")
     } catch {

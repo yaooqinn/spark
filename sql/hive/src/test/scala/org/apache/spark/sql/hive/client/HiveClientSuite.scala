@@ -34,7 +34,7 @@ import org.apache.spark.sql.catalyst.analysis.{DatabaseAlreadyExistsException, N
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EqualTo, Literal}
 import org.apache.spark.sql.hive.HiveExternalCatalog
-import org.apache.spark.sql.hive.test.TestHiveVersion
+import org.apache.spark.sql.hive.test.{TestHiveSingleton, TestHiveVersion}
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.util.{MutableURLClassLoader, Utils}
 
@@ -552,15 +552,19 @@ class HiveClientSuite(version: String) extends HiveVersionSuite(version) {
   // SQL related API
   ///////////////////////////////////////////////////////////////////////////
 
+  private def runSqlHive(sql: String): Seq[String] = {
+    TestHiveSingleton.runSqlHive(sql, client)
+  }
+
   test("sql set command") {
-    client.runSqlHive("SET spark.sql.test.key=1")
+    runSqlHive("SET spark.sql.test.key=1")
   }
 
   test("sql create index and reset") {
     // HIVE-18448 Since Hive 3.0, INDEX is not supported.
     if (version != "3.0" && version != "3.1") {
-      client.runSqlHive("CREATE TABLE indexed_table (key INT)")
-      client.runSqlHive("CREATE INDEX index_1 ON TABLE indexed_table(key) " +
+      runSqlHive("CREATE TABLE indexed_table (key INT)")
+      runSqlHive("CREATE INDEX index_1 ON TABLE indexed_table(key) " +
         "as 'COMPACT' WITH DEFERRED REBUILD")
     }
   }
@@ -570,8 +574,8 @@ class HiveClientSuite(version: String) extends HiveVersionSuite(version) {
     // Since Hive 3.0(HIVE-19383), we can not run local MR by `client.runSqlHive` with JDK 11.
     if (version == "2.3") {
       // Since HIVE-18394(Hive 3.1), "Create Materialized View" should default to rewritable ones
-      client.runSqlHive("CREATE TABLE materialized_view_tbl (c1 INT)")
-      client.runSqlHive(
+      runSqlHive("CREATE TABLE materialized_view_tbl (c1 INT)")
+      runSqlHive(
         s"CREATE MATERIALIZED VIEW mv1 AS SELECT * FROM materialized_view_tbl")
       checkError(
         exception = intercept[AnalysisException] {

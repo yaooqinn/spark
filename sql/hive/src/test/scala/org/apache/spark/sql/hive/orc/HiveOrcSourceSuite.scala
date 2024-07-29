@@ -69,8 +69,8 @@ class HiveOrcSourceSuite extends OrcSuite with TestHiveSingleton {
     val location = Utils.createTempDir()
     val uri = location.toURI
     try {
-      hiveClient.runSqlHive("USE default")
-      hiveClient.runSqlHive(
+      runSqlHive("USE default")
+      runSqlHive(
         """
           |CREATE EXTERNAL TABLE hive_orc(
           |  a STRING,
@@ -79,9 +79,8 @@ class HiveOrcSourceSuite extends OrcSuite with TestHiveSingleton {
           |  d ARRAY<CHAR(3)>)
           |STORED AS orc""".stripMargin)
       // Hive throws an exception if I assign the location in the create table statement.
-      hiveClient.runSqlHive(
-        s"ALTER TABLE hive_orc SET LOCATION '$uri'")
-      hiveClient.runSqlHive(
+      runSqlHive(s"ALTER TABLE hive_orc SET LOCATION '$uri'")
+      runSqlHive(
         """
           |INSERT INTO TABLE hive_orc
           |SELECT 'a', 'b', 'c', ARRAY(CAST('d' AS CHAR(3)))
@@ -102,8 +101,8 @@ class HiveOrcSourceSuite extends OrcSuite with TestHiveSingleton {
       checkAnswer(spark.table("hive_orc"), result)
       checkAnswer(spark.table("spark_orc"), result)
     } finally {
-      hiveClient.runSqlHive("DROP TABLE IF EXISTS hive_orc")
-      hiveClient.runSqlHive("DROP TABLE IF EXISTS spark_orc")
+      runSqlHive("DROP TABLE IF EXISTS hive_orc")
+      runSqlHive("DROP TABLE IF EXISTS spark_orc")
       Utils.deleteRecursively(location)
     }
   }

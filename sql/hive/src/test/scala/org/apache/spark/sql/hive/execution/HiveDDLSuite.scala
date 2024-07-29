@@ -38,7 +38,7 @@ import org.apache.spark.sql.errors.DataTypeErrors.toSQLType
 import org.apache.spark.sql.execution.command.{DDLSuite, DDLUtils}
 import org.apache.spark.sql.execution.datasources.orc.OrcCompressionCodec
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetCompressionCodec, ParquetFooterReader}
-import org.apache.spark.sql.hive.{HiveExternalCatalog, HiveUtils}
+import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.HiveUtils.{CONVERT_METASTORE_ORC, CONVERT_METASTORE_PARQUET}
 import org.apache.spark.sql.hive.orc.OrcFileOperator
 import org.apache.spark.sql.hive.test.{TestHive, TestHiveSingleton, TestHiveSparkSession}
@@ -1743,13 +1743,11 @@ class HiveDDLSuite
     val tabName = "tab1"
     val indexName = tabName + "_index"
     withTable(tabName) {
-      // Spark SQL does not support creating index. Thus, we have to use Hive client.
-      val client =
-        spark.sharedState.externalCatalog.unwrapped.asInstanceOf[HiveExternalCatalog].client
       sql(s"CREATE TABLE $tabName(a int)")
 
       try {
-        client.runSqlHive(
+        // Spark SQL does not support creating index. Thus, we have to use Hive client.
+        runSqlHive(
           s"CREATE INDEX $indexName ON TABLE $tabName (a) AS 'COMPACT' WITH DEFERRED REBUILD")
         val indexTabName =
           spark.sessionState.catalog.listTables("default", s"*$indexName*").head.table
@@ -1797,7 +1795,7 @@ class HiveDDLSuite
             "tableType" -> "index table")
         )
       } finally {
-        client.runSqlHive(s"DROP INDEX IF EXISTS $indexName ON $tabName")
+        runSqlHive(s"DROP INDEX IF EXISTS $indexName ON $tabName")
       }
     }
   }
@@ -1806,9 +1804,7 @@ class HiveDDLSuite
     val tabName = "tab1"
     withTable(tabName) {
       // Spark SQL does not support creating skewed table. Thus, we have to use Hive client.
-      val client =
-        spark.sharedState.externalCatalog.unwrapped.asInstanceOf[HiveExternalCatalog].client
-      client.runSqlHive(
+      runSqlHive(
         s"""
            |CREATE Table $tabName(col1 int, col2 int)
            |PARTITIONED BY (part1 string, part2 string)
@@ -2898,7 +2894,7 @@ class HiveDDLSuite
         )
       ))
 
-      hiveClient.runSqlHive("CREATE VIEW v2 AS SELECT * FROM (SELECT 1) T")
+      runSqlHive("CREATE VIEW v2 AS SELECT * FROM (SELECT 1) T")
       assert(sql("DESC FORMATTED v2").collect().containsSlice(
         Seq(
           Row("Type", "VIEW", ""),

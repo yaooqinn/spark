@@ -60,8 +60,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
   private def checkNumericTypes(fileFormat: String, dataType: String, value: Any): Unit = {
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 $dataType) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values(1)")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 $dataType) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values(1)")
       checkAnswer(spark.table("hive_serde"), Row(1))
       spark.sql(s"INSERT INTO TABLE hive_serde values($value)")
       checkAnswer(spark.table("hive_serde"), Seq(Row(1), Row(value)))
@@ -71,8 +71,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
   private def checkDateTimeTypes(fileFormat: String): Unit = {
     // TIMESTAMP
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 TIMESTAMP) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values('2019-04-11 15:50:00')")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 TIMESTAMP) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values('2019-04-11 15:50:00')")
       checkAnswer(spark.table("hive_serde"), Row(Timestamp.valueOf("2019-04-11 15:50:00")))
       spark.sql("INSERT INTO TABLE hive_serde values(TIMESTAMP('2019-04-12 15:50:00'))")
       checkAnswer(
@@ -83,8 +83,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
     // DATE
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 DATE) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values('2019-04-11')")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 DATE) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values('2019-04-11')")
       checkAnswer(spark.table("hive_serde"), Row(Date.valueOf("2019-04-11")))
       spark.sql("INSERT INTO TABLE hive_serde values(TIMESTAMP('2019-04-12'))")
       checkAnswer(
@@ -95,8 +95,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
   private def checkStringTypes(fileFormat: String, dataType: String, value: String): Unit = {
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 $dataType) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values('s')")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 $dataType) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values('s')")
       checkAnswer(spark.table("hive_serde"), Row("s"))
       spark.sql(s"INSERT INTO TABLE hive_serde values('$value')")
       checkAnswer(spark.table("hive_serde"), Seq(Row("s"), Row(value)))
@@ -105,8 +105,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
   private def checkCharTypes(fileFormat: String): Unit = {
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 CHAR(10)) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values('s')")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 CHAR(10)) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values('s')")
       checkAnswer(spark.table("hive_serde"), Row("s" + " " * 9))
       spark.sql(s"INSERT INTO TABLE hive_serde values('s3')")
       checkAnswer(spark.table("hive_serde"), Seq(Row("s" + " " * 9), Row("s3" + " " * 8)))
@@ -116,8 +116,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
   private def checkMiscTypes(fileFormat: String): Unit = {
     // BOOLEAN
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 BOOLEAN) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values(false)")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 BOOLEAN) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values(false)")
       checkAnswer(spark.table("hive_serde"), Row(false))
       spark.sql("INSERT INTO TABLE hive_serde values(true)")
       checkAnswer(spark.table("hive_serde"), Seq(Row(false), Row(true)))
@@ -125,8 +125,8 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
     // BINARY
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 BINARY) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde values('1')")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 BINARY) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde values('1')")
       checkAnswer(spark.table("hive_serde"), Row("1".getBytes))
       spark.sql("INSERT INTO TABLE hive_serde values(BINARY('2'))")
       checkAnswer(spark.table("hive_serde"), Seq(Row("1".getBytes), Row("2".getBytes)))
@@ -136,17 +136,17 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
   private def checkComplexTypes(fileFormat: String): Unit = {
     // ARRAY<data_type>
     withTable("hive_serde") {
-      hiveClient.runSqlHive(s"CREATE TABLE hive_serde (c1 ARRAY <STRING>) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde SELECT ARRAY('a','b') FROM (SELECT 1) t")
+      runSqlHive(s"CREATE TABLE hive_serde (c1 ARRAY <STRING>) STORED AS $fileFormat")
+      runSqlHive("INSERT INTO TABLE hive_serde SELECT ARRAY('a','b') FROM (SELECT 1) t")
       checkAnswer(spark.table("hive_serde"), Row(Array("a", "b")))
       spark.sql("INSERT INTO TABLE hive_serde SELECT ARRAY('c', 'd')")
       checkAnswer(spark.table("hive_serde"), Seq(Row(Array("a", "b")), Row(Array("c", "d"))))
     }
     // MAP<primitive_type, data_type>
     withTable("hive_serde") {
-      hiveClient.runSqlHive(
+      runSqlHive(
         s"CREATE TABLE hive_serde (c1 MAP <STRING, STRING>) STORED AS $fileFormat")
-      hiveClient.runSqlHive("INSERT INTO TABLE hive_serde SELECT MAP('1', 'a') FROM (SELECT 1) t")
+      runSqlHive("INSERT INTO TABLE hive_serde SELECT MAP('1', 'a') FROM (SELECT 1) t")
       checkAnswer(spark.table("hive_serde"), Row(Map("1" -> "a")))
       spark.sql("INSERT INTO TABLE hive_serde SELECT MAP('2', 'b')")
       checkAnswer(spark.table("hive_serde"), Seq(Row(Map("1" -> "a")), Row(Map("2" -> "b"))))
@@ -154,9 +154,9 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
     // STRUCT<col_name : data_type [COMMENT col_comment], ...>
     withTable("hive_serde") {
-      hiveClient.runSqlHive(
+      runSqlHive(
         s"CREATE TABLE hive_serde (c1 STRUCT <k: INT>) STORED AS $fileFormat")
-      hiveClient.runSqlHive(
+      runSqlHive(
         "INSERT INTO TABLE hive_serde SELECT NAMED_STRUCT('k', 1) FROM (SELECT 1) t")
       checkAnswer(spark.table("hive_serde"), Row(Row(1)))
       spark.sql("INSERT INTO TABLE hive_serde SELECT NAMED_STRUCT('k', 2)")
@@ -197,7 +197,7 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
 
   test("SPARK-34512: Disable validate default values when parsing Avro schemas") {
     withTable("t1") {
-      hiveClient.runSqlHive(
+      runSqlHive(
         """
           |CREATE TABLE t1
           |  ROW FORMAT SERDE
@@ -221,7 +221,7 @@ class HiveSerDeReadWriteSuite extends QueryTest with SQLTestUtils with TestHiveS
           |    }')
           |""".stripMargin)
 
-      hiveClient.runSqlHive("INSERT INTO t1 SELECT array('SPARK-34512', 'HIVE-24797')")
+      runSqlHive("INSERT INTO t1 SELECT array('SPARK-34512', 'HIVE-24797')")
       checkAnswer(spark.table("t1"), Seq(Row(Array("SPARK-34512", "HIVE-24797"))))
     }
   }

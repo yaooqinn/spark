@@ -39,7 +39,7 @@ import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.expressions.Window
-import org.apache.spark.sql.hive.test.{HiveTestJars, TestHiveContext}
+import org.apache.spark.sql.hive.test.{HiveTestJars, TestHiveContext, TestHiveSingleton}
 import org.apache.spark.sql.internal.SQLConf.{LEGACY_TIME_PARSER_POLICY, SHUFFLE_PARTITIONS}
 import org.apache.spark.sql.internal.StaticSQLConf.WAREHOUSE_PATH
 import org.apache.spark.sql.types.{DecimalType, StructType}
@@ -842,7 +842,8 @@ object SPARK_18360 {
         provider = Some(DDLUtils.HIVE_PROVIDER))
 
       val newWarehousePath = Utils.createTempDir().getAbsolutePath
-      hiveClient.runSqlHive(s"SET hive.metastore.warehouse.dir=$newWarehousePath")
+      TestHiveSingleton
+        .runSqlHive(s"SET hive.metastore.warehouse.dir=$newWarehousePath", hiveClient)
       hiveClient.createTable(tableMeta, ignoreIfExists = false)
       val rawTable = hiveClient.getTable("default", "test_tbl")
       // Hive will use the value of `hive.metastore.warehouse.dir` to generate default table
@@ -859,7 +860,8 @@ object SPARK_18360 {
         .get.contains(defaultDbLocation))
     } finally {
       hiveClient.dropTable("default", "test_tbl", ignoreIfNotExists = true, purge = false)
-      hiveClient.runSqlHive(s"SET hive.metastore.warehouse.dir=$defaultDbLocation")
+      TestHiveSingleton
+        .runSqlHive(s"SET hive.metastore.warehouse.dir=$defaultDbLocation", hiveClient)
     }
   }
 }

@@ -285,8 +285,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
       assert(partition.stats.get.sizeInBytes == 5812)
       assert(partition.stats.get.rowCount.isEmpty)
 
-      hiveClient
-        .runSqlHive(s"ANALYZE TABLE $tableName PARTITION (ds='2017-01-01') COMPUTE STATISTICS")
+      runSqlHive(s"ANALYZE TABLE $tableName PARTITION (ds='2017-01-01') COMPUTE STATISTICS")
       partition = spark.sessionState.catalog
         .getPartition(TableIdentifier(tableName), Map("ds" -> "2017-01-01"))
 
@@ -857,8 +856,8 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     sql(s"INSERT INTO TABLE $tabName SELECT * FROM src")
     if (analyzedBySpark) sql(s"ANALYZE TABLE $tabName COMPUTE STATISTICS")
     // This is to mimic the scenario in which Hive generates statistics before we read it
-    if (analyzedByHive) hiveClient.runSqlHive(s"ANALYZE TABLE $tabName COMPUTE STATISTICS")
-    val describeResult1 = hiveClient.runSqlHive(s"DESCRIBE FORMATTED $tabName")
+    if (analyzedByHive) runSqlHive(s"ANALYZE TABLE $tabName COMPUTE STATISTICS")
+    val describeResult1 = runSqlHive(s"DESCRIBE FORMATTED $tabName")
 
     val tableMetadata = getCatalogTable(tabName).properties
     // statistics info is not contained in the metadata of the original table
@@ -900,7 +899,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
 
       // ALTER TABLE SET TBLPROPERTIES invalidates some contents of Hive specific statistics
       // This is triggered by the Hive alterTable API
-      val describeResult = hiveClient.runSqlHive(s"DESCRIBE FORMATTED $tabName")
+      val describeResult = runSqlHive(s"DESCRIBE FORMATTED $tabName")
 
       val rawDataSize = extractStatsPropValues(describeResult, "rawDataSize")
       val numRows = extractStatsPropValues(describeResult, "numRows")
@@ -940,7 +939,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
         // Run ALTER TABLE command
         sql(alterTablePropCmd)
 
-        val describeResult = hiveClient.runSqlHive(s"DESCRIBE FORMATTED $tabName")
+        val describeResult = runSqlHive(s"DESCRIBE FORMATTED $tabName")
 
         val totalSize = extractStatsPropValues(describeResult, "totalSize")
         assert(totalSize.isDefined && totalSize.get > 0, "totalSize is lost")

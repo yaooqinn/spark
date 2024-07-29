@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.command.DDLUtils
+import org.apache.spark.sql.hive.test.TestHiveSingleton
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
 /**
@@ -36,6 +37,10 @@ class HiveExternalCatalogSuite extends ExternalCatalogSuite {
     val catalog = new HiveExternalCatalog(new SparkConf, new Configuration)
     catalog.client.reset()
     catalog
+  }
+
+  private def runSqlHive(sql: String): Seq[String] = {
+    TestHiveSingleton.runSqlHive(sql, externalCatalog.client)
   }
 
   protected override val utils: CatalogTestUtils = new CatalogTestUtils {
@@ -94,7 +99,7 @@ class HiveExternalCatalogSuite extends ExternalCatalogSuite {
 
   test("SPARK-22306: alter table schema should not erase the bucketing metadata at hive side") {
     val catalog = newBasicCatalog()
-    externalCatalog.client.runSqlHive(
+    runSqlHive(
       """
         |CREATE TABLE db1.t(a string, b string)
         |CLUSTERED BY (a, b) SORTED BY (a, b) INTO 10 BUCKETS
@@ -105,33 +110,33 @@ class HiveExternalCatalogSuite extends ExternalCatalogSuite {
     catalog.alterTableDataSchema("db1", "t", newSchema)
 
     assert(catalog.getTable("db1", "t").schema == newSchema)
-    val bucketString = externalCatalog.client.runSqlHive("DESC FORMATTED db1.t")
+    val bucketString = runSqlHive("DESC FORMATTED db1.t")
       .filter(_.contains("Num Buckets")).head
     assert(bucketString.contains("10"))
   }
 
   test("SPARK-30050: analyze/rename table should not erase the bucketing metadata at hive side") {
     val catalog = newBasicCatalog()
-    externalCatalog.client.runSqlHive(
+    runSqlHive(
       """
         |CREATE TABLE db1.t(a string, b string)
         |CLUSTERED BY (a, b) SORTED BY (a, b) INTO 10 BUCKETS
         |STORED AS PARQUET
       """.stripMargin)
 
-    val bucketString1 = externalCatalog.client.runSqlHive("DESC FORMATTED db1.t")
+    val bucketString1 = runSqlHive("DESC FORMATTED db1.t")
       .filter(_.contains("Num Buckets")).head
     assert(bucketString1.contains("10"))
 
     catalog.alterTableStats("db1", "t", None)
 
-    val bucketString2 = externalCatalog.client.runSqlHive("DESC FORMATTED db1.t")
+    val bucketString2 = runSqlHive("DESC FORMATTED db1.t")
       .filter(_.contains("Num Buckets")).head
     assert(bucketString2.contains("10"))
 
     catalog.renameTable("db1", "t", "t2")
 
-    val bucketString3 = externalCatalog.client.runSqlHive("DESC FORMATTED db1.t2")
+    val bucketString3 = runSqlHive("DESC FORMATTED db1.t2")
       .filter(_.contains("Num Buckets")).head
     assert(bucketString3.contains("10"))
   }
@@ -158,25 +163,24 @@ class HiveExternalCatalogSuite extends ExternalCatalogSuite {
   }
 
   test("SPARK-30868 throw an exception if HiveClient#runSqlHive fails") {
-    val client = externalCatalog.client
     // test add jars which doesn't exists
     val jarPath = "file:///tmp/not_exists.jar"
-    assertThrows[QueryExecutionException](client.runSqlHive(s"ADD JAR $jarPath"))
+    assertThrows[QueryExecutionException](runSqlHive(s"ADD JAR $jarPath"))
 
     // test change to the database which doesn't exists
-    assertThrows[QueryExecutionException](client.runSqlHive(
+    assertThrows[QueryExecutionException](runSqlHive(
       s"use db_not_exists"))
 
     // test create hive table failed with unsupported into type
-    assertThrows[QueryExecutionException](client.runSqlHive(
+    assertThrows[QueryExecutionException](runSqlHive(
       s"CREATE TABLE t(n into)"))
 
     // test desc table failed with wrong `FORMATED` keyword
-    assertThrows[QueryExecutionException](client.runSqlHive(
+    assertThrows[QueryExecutionException](runSqlHive(
       s"DESC FORMATED t"))
 
     // test wrong insert query
-    assertThrows[QueryExecutionException](client.runSqlHive(
+    assertThrows[QueryExecutionException](runSqlHive(
       "INSERT overwrite directory \"fs://localhost/tmp\" select 1 as a"))
   }
 

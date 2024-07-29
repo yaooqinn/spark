@@ -19,7 +19,7 @@ package org.apache.spark.sql.hive.client
 
 import java.lang.{Boolean => JBoolean, Integer => JInteger, Long => JLong}
 import java.lang.reflect.{InvocationTargetException, Method}
-import java.util.{ArrayList => JArrayList, List => JList, Locale, Map => JMap}
+import java.util.{List => JList, Locale, Map => JMap}
 import java.util.concurrent.TimeUnit
 
 import scala.jdk.CollectionConverters._
@@ -29,11 +29,9 @@ import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.metastore.{IMetaStoreClient, PartitionDropOptions, TableType}
 import org.apache.hadoop.hive.metastore.api.{Database, EnvironmentContext, Function => HiveFunction, FunctionType, Index, MetaException, PrincipalType, ResourceType, ResourceUri}
-import org.apache.hadoop.hive.ql.Driver
 import org.apache.hadoop.hive.ql.io.AcidUtils
 import org.apache.hadoop.hive.ql.metadata.{Hive, HiveException, Partition, Table}
 import org.apache.hadoop.hive.ql.plan.AddPartitionDesc
-import org.apache.hadoop.hive.ql.processors.{CommandProcessor, CommandProcessorFactory}
 import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.serde.serdeConstants
 
@@ -104,10 +102,6 @@ private[client] sealed abstract class Shim {
       table: Table,
       predicates: Seq[Expression],
       catalogTable: CatalogTable): Seq[Partition]
-
-  def getCommandProcessor(token: String, conf: HiveConf): CommandProcessor
-
-  def getDriverResults(driver: Driver): Seq[String]
 
   def getMetastoreClientConnectRetryDelayMillis(conf: HiveConf): Long
 
@@ -446,18 +440,6 @@ private[client] class Shim_v2_0 extends Shim with Logging {
           hive.getAllPartitionsOf(table)
       }
     }
-  }
-
-  override def getCommandProcessor(token: String, conf: HiveConf): CommandProcessor =
-    CommandProcessorFactory.get(Array(token), conf)
-
-  override def getDriverResults(driver: Driver): Seq[String] = {
-    val res = new JArrayList[Object]()
-    driver.getResults(res)
-    res.asScala.map {
-      case s: String => s
-      case a: Array[Object] => a(0).asInstanceOf[String]
-    }.toSeq
   }
 
   override def getMetastoreClientConnectRetryDelayMillis(conf: HiveConf): Long =
