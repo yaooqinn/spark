@@ -775,10 +775,6 @@ jobs:
     if: (!cancelled()) && fromJson(needs.precondition.outputs.required).docs == 'true'
     name: Documentation generation
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
     timeout-minutes: 180
     env:
       LC_ALL: C.UTF-8
