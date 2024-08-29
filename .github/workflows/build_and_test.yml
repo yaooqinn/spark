@@ -899,6 +899,11 @@ jobs:
         name: site
         path: site.tar.bz2
         retention-days: 1
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: docs/_site
 
   # Any TPC-DS related updates on this job need to be applied to tpcds-1g-gen job of benchmark.yml as well
   tpcds-1g:
