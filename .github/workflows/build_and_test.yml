@@ -49,6 +49,7 @@ on:
         required: false
         type: string
         default: ''
+
 jobs:
   precondition:
     name: Check changes
@@ -772,6 +773,10 @@ jobs:
     needs: [precondition, infra-image]
     # always run if lint == 'true', even infra-image is skip (such as non-master job)
     if: (!cancelled()) && fromJson(needs.precondition.outputs.required).docs == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     name: Documentation generation
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -889,21 +894,16 @@ jobs:
         echo "SKIP_SQLDOC: $SKIP_SQLDOC"
         cd docs
         bundle exec jekyll build
-    - name: Tar documentation
-      if: github.repository != 'apache/spark'
-      run: tar cjf site.tar.bz2 docs/_site
     - name: Upload documentation
       if: github.repository != 'apache/spark'
       uses: actions/upload-artifact@v4
       with:
         name: site
-        path: site.tar.bz2
+        path: docs/_site
         retention-days: 1
     - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v4
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: docs/_site
+      id: deployment
+      uses: actions/deploy-pages@v4
 
   # Any TPC-DS related updates on this job need to be applied to tpcds-1g-gen job of benchmark.yml as well
   tpcds-1g:
