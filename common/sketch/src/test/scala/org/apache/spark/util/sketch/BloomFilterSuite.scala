@@ -39,8 +39,9 @@ class BloomFilterSuite extends AnyFunSuite { // scalastyle:ignore funsuite
     assert(filter == deserialized)
   }
 
-  def testAccuracy[T: ClassTag](typeName: String, numItems: Int)(itemGen: Random => T): Unit = {
-    test(s"accuracy - $typeName") {
+  def testAccuracy[T: ClassTag](
+      typeName: String, numItems: Int, version: Int)(itemGen: Random => T): Unit = {
+    test(s"accuracy - $typeName - version $version") {
       // use a fixed seed to make the test predictable.
       val r = new Random(37)
       val fpp = 0.05
@@ -48,40 +49,43 @@ class BloomFilterSuite extends AnyFunSuite { // scalastyle:ignore funsuite
 
       val allItems = Array.fill(numItems)(itemGen(r))
 
-      val filter = BloomFilter.create(numInsertion, fpp)
+      val filter = BloomFilter.create(numInsertion, fpp, version)
 
       // insert first `numInsertion` items.
-      allItems.take(numInsertion).foreach(filter.put)
+      val insertedItems = allItems.take(numInsertion)
+      insertedItems.foreach(filter.put)
 
       // false negative is not allowed.
-      assert(allItems.take(numInsertion).forall(filter.mightContain))
+      assert(insertedItems.forall(filter.mightContain))
 
       // The number of inserted items doesn't exceed `expectedNumItems`, so the `expectedFpp`
       // should not be significantly higher than the one we passed in to create this bloom filter.
       assert(filter.expectedFpp() - fpp < EPSILON)
 
-      val errorCount = allItems.drop(numInsertion).count(filter.mightContain)
+      val rest = allItems.diff(insertedItems)
+      val errorCount = rest.count(filter.mightContain)
 
       // Also check the actual fpp is not significantly higher than we expected.
-      val actualFpp = errorCount.toDouble / (numItems - numInsertion)
+      val actualFpp = errorCount.toDouble / rest.length
       assert(actualFpp - fpp < EPSILON)
 
       checkSerDe(filter)
     }
   }
 
-  def testMergeInPlace[T: ClassTag](typeName: String, numItems: Int)(itemGen: Random => T): Unit = {
-    test(s"mergeInPlace - $typeName") {
+  def testMergeInPlace[T: ClassTag](
+      typeName: String, numItems: Int, version: Int)(itemGen: Random => T): Unit = {
+    test(s"mergeInPlace - $typeName - version $version") {
       // use a fixed seed to make the test predictable.
       val r = new Random(37)
 
       val items1 = Array.fill(numItems / 2)(itemGen(r))
       val items2 = Array.fill(numItems / 2)(itemGen(r))
 
-      val filter1 = BloomFilter.create(numItems)
+      val filter1 = BloomFilter.create(numItems, BloomFilter.DEFAULT_FPP, version)
       items1.foreach(filter1.put)
 
-      val filter2 = BloomFilter.create(numItems)
+      val filter2 = BloomFilter.create(numItems, BloomFilter.DEFAULT_FPP, version)
       items2.foreach(filter2.put)
 
       filter1.mergeInPlace(filter2)
@@ -97,19 +101,19 @@ class BloomFilterSuite extends AnyFunSuite { // scalastyle:ignore funsuite
     }
   }
 
-  def testIntersectInPlace[T: ClassTag]
-  (typeName: String, numItems: Int)(itemGen: Random => T): Unit = {
-    test(s"intersectInPlace - $typeName") {
+  def testIntersectInPlace[T: ClassTag](
+      typeName: String, numItems: Int, version: Int)(itemGen: Random => T): Unit = {
+    test(s"intersectInPlace - $typeName - version $version") {
       // use a fixed seed to make the test predictable.
       val r = new Random(37)
 
       val items1 = Array.fill(numItems / 2)(itemGen(r))
       val items2 = Array.fill(numItems / 2)(itemGen(r))
 
-      val filter1 = BloomFilter.create(numItems / 2)
+      val filter1 = BloomFilter.create(numItems / 2, BloomFilter.DEFAULT_FPP, version)
       items1.foreach(filter1.put)
 
-      val filter2 = BloomFilter.create(numItems / 2)
+      val filter2 = BloomFilter.create(numItems / 2, BloomFilter.DEFAULT_FPP, version)
       items2.foreach(filter2.put)
 
       filter1.intersectInPlace(filter2)
@@ -127,12 +131,17 @@ class BloomFilterSuite extends AnyFunSuite { // scalastyle:ignore funsuite
   }
 
   def testItemType[T: ClassTag](typeName: String, numItems: Int)(itemGen: Random => T): Unit = {
-    testAccuracy[T](typeName, numItems)(itemGen)
-    testMergeInPlace[T](typeName, numItems)(itemGen)
-    testIntersectInPlace[T](typeName, numItems)(itemGen)
+    testAccuracy[T](typeName, numItems, 1)(itemGen)
+    testAccuracy[T](typeName, numItems, 2)(itemGen)
+    testMergeInPlace[T](typeName, numItems, 1)(itemGen)
+    testMergeInPlace[T](typeName, numItems, 2)(itemGen)
+    testIntersectInPlace[T](typeName, numItems, 1)(itemGen)
+    testIntersectInPlace[T](typeName, numItems, 2)(itemGen)
+
   }
 
-  testItemType[Byte]("Byte", 160) { _.nextInt().toByte }
+  // 60 is a magic number satisfying the requirement of `actualFpp` assertion.
+  testItemType[Byte]("Byte", 60) { _.nextBytes(1).head }
 
   testItemType[Short]("Short", 1000) { _.nextInt().toShort }
 
@@ -156,6 +165,12 @@ class BloomFilterSuite extends AnyFunSuite { // scalastyle:ignore funsuite
     intercept[IncompatibleMergeException] {
       val filter1 = BloomFilter.create(1000, 6400)
       val filter2 = BloomFilter.create(2000, 6400)
+      filter1.mergeInPlace(filter2)
+    }
+
+    intercept[IncompatibleMergeException] {
+      val filter1 = BloomFilter.create(1000, 6400, 1)
+      val filter2 = BloomFilter.create(1000, 6400, 2)
       filter1.mergeInPlace(filter2)
     }
   }

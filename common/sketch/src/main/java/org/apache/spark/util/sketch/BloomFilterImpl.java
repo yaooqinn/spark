@@ -18,6 +18,7 @@
 package org.apache.spark.util.sketch;
 
 import java.io.*;
+import java.util.Objects;
 
 class BloomFilterImpl extends BloomFilter implements Serializable {
 
@@ -25,13 +26,23 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
 
   private BitArray bits;
 
-  BloomFilterImpl(int numHashFunctions, long numBits) {
-    this(new BitArray(numBits), numHashFunctions);
+  private int version;
+
+  private HashStrategy strategy;
+
+  BloomFilterImpl(int numHashFunctions, long numBits, int version) {
+    this(new BitArray(numBits), numHashFunctions, version);
   }
 
-  private BloomFilterImpl(BitArray bits, int numHashFunctions) {
+  BloomFilterImpl(int numHashFunctions, long numBits) {
+    this(new BitArray(numBits), numHashFunctions, Version.V1.getVersionNumber());
+  }
+
+  private BloomFilterImpl(BitArray bits, int numHashFunctions, int version) {
     this.bits = bits;
     this.numHashFunctions = numHashFunctions;
+    this.version = version;
+    this.strategy = HashStrategies.fromVersion(version);
   }
 
   private BloomFilterImpl() {}
@@ -46,12 +57,13 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
       return false;
     }
 
-    return this.numHashFunctions == that.numHashFunctions && this.bits.equals(that.bits);
+    return this.version == that.version &&
+      this.numHashFunctions == that.numHashFunctions && this.bits.equals(that.bits);
   }
 
   @Override
   public int hashCode() {
-    return bits.hashCode() * 31 + numHashFunctions;
+    return Objects.hash(bits, numHashFunctions, version);
   }
 
   @Override
@@ -82,20 +94,7 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
 
   @Override
   public boolean putBinary(byte[] item) {
-    int h1 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
-    int h2 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, h1);
-
-    long bitSize = bits.bitSize();
-    boolean bitsChanged = false;
-    for (int i = 1; i <= numHashFunctions; i++) {
-      int combinedHash = h1 + (i * h2);
-      // Flip all the bits if it's negative (guaranteed positive number)
-      if (combinedHash < 0) {
-        combinedHash = ~combinedHash;
-      }
-      bitsChanged |= bits.set(combinedHash % bitSize);
-    }
-    return bitsChanged;
+    return strategy.putBinary(item, bits, numHashFunctions);
   }
 
   @Override
@@ -105,63 +104,17 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
 
   @Override
   public boolean mightContainBinary(byte[] item) {
-    int h1 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
-    int h2 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, h1);
-
-    long bitSize = bits.bitSize();
-    for (int i = 1; i <= numHashFunctions; i++) {
-      int combinedHash = h1 + (i * h2);
-      // Flip all the bits if it's negative (guaranteed positive number)
-      if (combinedHash < 0) {
-        combinedHash = ~combinedHash;
-      }
-      if (!bits.get(combinedHash % bitSize)) {
-        return false;
-      }
-    }
-    return true;
+    return strategy.mightContainBinary(item, bits, numHashFunctions);
   }
 
   @Override
   public boolean putLong(long item) {
-    // Here we first hash the input long element into 2 int hash values, h1 and h2, then produce n
-    // hash values by `h1 + i * h2` with 1 <= i <= numHashFunctions.
-    // Note that `CountMinSketch` use a different strategy, it hash the input long element with
-    // every i to produce n hash values.
-    // TODO: the strategy of `CountMinSketch` looks more advanced, should we follow it here?
-    int h1 = Murmur3_x86_32.hashLong(item, 0);
-    int h2 = Murmur3_x86_32.hashLong(item, h1);
-
-    long bitSize = bits.bitSize();
-    boolean bitsChanged = false;
-    for (int i = 1; i <= numHashFunctions; i++) {
-      int combinedHash = h1 + (i * h2);
-      // Flip all the bits if it's negative (guaranteed positive number)
-      if (combinedHash < 0) {
-        combinedHash = ~combinedHash;
-      }
-      bitsChanged |= bits.set(combinedHash % bitSize);
-    }
-    return bitsChanged;
+    return strategy.putLong(item, bits, numHashFunctions);
   }
 
   @Override
   public boolean mightContainLong(long item) {
-    int h1 = Murmur3_x86_32.hashLong(item, 0);
-    int h2 = Murmur3_x86_32.hashLong(item, h1);
-
-    long bitSize = bits.bitSize();
-    for (int i = 1; i <= numHashFunctions; i++) {
-      int combinedHash = h1 + (i * h2);
-      // Flip all the bits if it's negative (guaranteed positive number)
-      if (combinedHash < 0) {
-        combinedHash = ~combinedHash;
-      }
-      if (!bits.get(combinedHash % bitSize)) {
-        return false;
-      }
-    }
-    return true;
+    return strategy.mightContainLong(item, bits, numHashFunctions);
   }
 
   @Override
@@ -185,7 +138,8 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
       return false;
     }
 
-    return this.bitSize() == that.bitSize() && this.numHashFunctions == that.numHashFunctions;
+    return this.bitSize() == that.bitSize() &&
+      this.numHashFunctions == that.numHashFunctions && this.version == that.version;
   }
 
   @Override
@@ -231,26 +185,28 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
         "Cannot merge bloom filters with different number of hash functions"
       );
     }
+
+    if (this.version != that.version) {
+      throw new IncompatibleMergeException(
+          "Cannot merge bloom filters with different versions"
+      );
+    }
+
     return that;
   }
 
   @Override
   public void writeTo(OutputStream out) throws IOException {
     DataOutputStream dos = new DataOutputStream(out);
-
-    dos.writeInt(Version.V1.getVersionNumber());
+    dos.writeInt(version);
     dos.writeInt(numHashFunctions);
     bits.writeTo(dos);
   }
 
   private void readFrom0(InputStream in) throws IOException {
     DataInputStream dis = new DataInputStream(in);
-
-    int version = dis.readInt();
-    if (version != Version.V1.getVersionNumber()) {
-      throw new IOException("Unexpected Bloom filter version number (" + version + ")");
-    }
-
+    this.version = dis.readInt();
+    this.strategy = HashStrategies.fromVersion(version);
     this.numHashFunctions = dis.readInt();
     this.bits = BitArray.readFrom(dis);
   }
@@ -273,5 +229,121 @@ class BloomFilterImpl extends BloomFilter implements Serializable {
 
   private void readObject(ObjectInputStream in) throws IOException {
     readFrom0(in);
+  }
+
+  interface HashStrategy extends Serializable {
+    boolean putBinary(byte[] item, BitArray bits, int numHashFunctions);
+    boolean putLong(long item, BitArray bits, int numHashFunctions);
+    boolean mightContainBinary(byte[] item, BitArray bits, int numHashFunctions);
+    boolean mightContainLong(long item, BitArray bits, int numHashFunctions);
+
+    default boolean mightContainInternal(BitArray bits, int h1, int h2, int numHashFunctions) {
+      long bitSize = bits.bitSize();
+      for (int i = 1; i <= numHashFunctions; i++) {
+        int combinedHash = h1 + i * h2;
+        // Flip all the bits if it's negative (guaranteed positive number)
+        if (combinedHash < 0) {
+          combinedHash = ~combinedHash;
+        }
+        if (!bits.get(combinedHash % bitSize)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    default boolean putInternal(BitArray bits, int h1, int h2, int numHashFunctions) {
+      long bitSize = bits.bitSize();
+      boolean bitsChanged = false;
+      for (int i = 1; i <= numHashFunctions; i++) {
+        int combinedHash = h1 + i * h2;
+        // Flip all the bits if it's negative (guaranteed positive number)
+        if (combinedHash < 0) {
+          combinedHash = ~combinedHash;
+        }
+        bitsChanged |= bits.set(combinedHash % bitSize);
+      }
+      return bitsChanged;
+    }
+  }
+
+  enum HashStrategies implements HashStrategy {
+    MURMUR3_x86_32 {
+      @Override
+      public boolean putBinary(byte[] item, BitArray bits, int numHashFunctions) {
+        int h1 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
+        int h2 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, h1);
+        return putInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean putLong(long item, BitArray bits, int numHashFunctions) {
+        // Here we first hash the input long element into 2 int hash values, h1 and h2, then
+        // produce n hash values by `h1 + i * h2` with 1 <= i <= numHashFunctions.
+        // Note that `CountMinSketch` use a different strategy, it hash the input long element
+        // with every i to produce n hash values.
+        // TODO: the strategy of `CountMinSketch` looks more advanced, should we follow it here?
+        int h1 = Murmur3_x86_32.hashLong(item, 0);
+        int h2 = Murmur3_x86_32.hashLong(item, h1);
+        return putInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean mightContainBinary(byte[] item, BitArray bits, int numHashFunctions) {
+        int h1 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
+        int h2 = Murmur3_x86_32.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, h1);
+        return mightContainInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean mightContainLong(long item, BitArray bits, int numHashFunctions) {
+        int h1 = Murmur3_x86_32.hashLong(item, 0);
+        int h2 = Murmur3_x86_32.hashLong(item, h1);
+        return mightContainInternal(bits, h1, h2, numHashFunctions);
+      }
+    },
+    XX_HASH_64 {
+      @Override
+      public boolean putBinary(byte[] item, BitArray bits, int numHashFunctions) {
+        long h64 = XXH64.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
+        int h1 = (int) h64;
+        int h2 = (int) (h64 >>> 32);
+        return putInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean putLong(long item, BitArray bits, int numHashFunctions) {
+        long h64 = XXH64.hashLong(item, 0);
+        int h1 = (int) h64;
+        int h2 = (int) (h64 >>> 32);
+        return putInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean mightContainBinary(byte[] item, BitArray bits, int numHashFunctions) {
+        long h64 = XXH64.hashUnsafeBytes(item, Platform.BYTE_ARRAY_OFFSET, item.length, 0);
+        int h1 = (int) h64;
+        int h2 = (int) (h64 >>> 32);
+        return mightContainInternal(bits, h1, h2, numHashFunctions);
+      }
+
+      @Override
+      public boolean mightContainLong(long item, BitArray bits, int numHashFunctions) {
+        long h64 = XXH64.hashLong(item, 0);
+        int h1 = (int) h64;
+        int h2 = (int) (h64 >>> 32);
+        return mightContainInternal(bits, h1, h2, numHashFunctions);
+      }
+    };
+
+    public static HashStrategy fromVersion(int version) {
+      return switch (version) {
+        case 1 -> HashStrategies.MURMUR3_x86_32;
+        case 2 -> HashStrategies.XX_HASH_64;
+        default ->
+          throw new IllegalArgumentException(
+            "Unsupported Bloom filter version number (" + version + ")");
+      };
+    }
   }
 }

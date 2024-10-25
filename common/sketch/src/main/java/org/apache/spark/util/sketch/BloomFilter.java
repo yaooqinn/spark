@@ -51,7 +51,7 @@ public abstract class BloomFilter {
      *   <li>The words/longs (numWords * 64 bit)</li>
      * </ul>
      */
-    V1(1);
+    V1(1), V2(2);
 
     private final int versionNumber;
 
@@ -248,7 +248,24 @@ public abstract class BloomFilter {
       );
     }
 
-    return create(expectedNumItems, optimalNumOfBits(expectedNumItems, fpp));
+    return create(expectedNumItems, fpp, Version.V1.getVersionNumber());
+  }
+
+  /**
+   * Creates a {@link BloomFilter} with the expected number of insertions and expected false
+   * positive probability.
+   *
+   * Note that overflowing a {@code BloomFilter} with significantly more elements than specified,
+   * will result in its saturation, and a sharp deterioration of its false positive probability.
+   */
+  public static BloomFilter create(long expectedNumItems, double fpp, int version) {
+    if (fpp <= 0D || fpp >= 1D) {
+      throw new IllegalArgumentException(
+          "False positive probability must be within range (0.0, 1.0)"
+      );
+    }
+
+    return create(expectedNumItems, optimalNumOfBits(expectedNumItems, fpp), version);
   }
 
   /**
@@ -256,6 +273,20 @@ public abstract class BloomFilter {
    * pick an optimal {@code numHashFunctions} which can minimize {@code fpp} for the bloom filter.
    */
   public static BloomFilter create(long expectedNumItems, long numBits) {
+    return create(expectedNumItems, numBits, Version.V1.getVersionNumber());
+  }
+
+  /**
+   * Creates a {@link BloomFilter} with given {@code expectedNumItems}, {@code numBits} and
+   * {@code version}, it will pick an optimal {@code numHashFunctions} which can minimize
+   * {@code fpp} for the bloom filter.
+   *
+   * @param expectedNumItems the number of expected insertions to the bloom filter
+   * @param numBits the number of bits in the bloom filter
+   * @param version the version of the bloom filter, different version generates different hash
+   *                indexes
+   */
+  public static BloomFilter create(long expectedNumItems, long numBits, int version) {
     if (expectedNumItems <= 0) {
       throw new IllegalArgumentException("Expected insertions must be positive");
     }
@@ -264,6 +295,7 @@ public abstract class BloomFilter {
       throw new IllegalArgumentException("Number of bits must be positive");
     }
 
-    return new BloomFilterImpl(optimalNumOfHashFunctions(expectedNumItems, numBits), numBits);
+    return new BloomFilterImpl(
+      optimalNumOfHashFunctions(expectedNumItems, numBits), numBits, version);
   }
 }
