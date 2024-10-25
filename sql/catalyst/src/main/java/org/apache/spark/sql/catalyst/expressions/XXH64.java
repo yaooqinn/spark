@@ -117,7 +117,7 @@ public final class XXH64 {
     return hashUnsafeBytes(str.getBaseObject(), str.getBaseOffset(), str.numBytes(), seed);
   }
 
-  private static long fmix(long hash) {
+  public static long fmix(long hash) {
     hash ^= hash >>> 33;
     hash *= PRIME64_2;
     hash ^= hash >>> 29;
