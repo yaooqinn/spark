@@ -208,7 +208,7 @@ public final class XXH3 {
         // XXH3_len_4to8_64b
         long s = seed ^ Long.reverseBytes(seed & 0xFFFFFFFFL);
         final long input1 = Platform.getInt(base, offset);
-        final long input2 = Platform.getInt(base, offset + length - 4) & 0xFFFFFFFFL;
+        final long input2 = u32(Platform.getInt(base, offset + length - 4));
         final long bitflip = (SECRETS[8] ^ SECRETS[16]) - s;
         final long keyed = (input2 + (input1 << 32)) ^ bitflip;
         return rrmxmx(keyed, length);
@@ -296,28 +296,28 @@ public final class XXH3 {
           acc_1 += data_val_0 + (0xFFFFFFFFL & data_key_1) * (data_key_1 >>> 32);
         }
         {
-          final long data_val_0 = Platform.getLong(base, offStripe + 8L * 2);
-          final long data_val_1 = Platform.getLong(base, offStripe + 8L * 3);
-          final long data_key_0 = data_val_0 ^ SECRETS[offSec + 8 * 2];
-          final long data_key_1 = data_val_0 ^ SECRETS[offSec + 8 * 3];
+          final long data_val_0 = Platform.getLong(base, offStripe + 16);
+          final long data_val_1 = Platform.getLong(base, offStripe + 24);
+          final long data_key_0 = data_val_0 ^ SECRETS[offSec + 16];
+          final long data_key_1 = data_val_0 ^ SECRETS[offSec + 24];
           /* swap adjacent lanes */
           acc_2 += data_val_1 + (0xFFFFFFFFL & data_key_0) * (data_key_0 >>> 32);
           acc_3 += data_val_0 + (0xFFFFFFFFL & data_key_1) * (data_key_1 >>> 32);
         }
         {
-          final long data_val_0 = Platform.getLong(base, offStripe + 8L * 4);
-          final long data_val_1 = Platform.getLong(base, offStripe + 8L * 5);
-          final long data_key_0 = data_val_0 ^ SECRETS[offSec + 8 * 4];
-          final long data_key_1 = data_val_0 ^ SECRETS[offSec + 8 * 5];
+          final long data_val_0 = Platform.getLong(base, offStripe + 32);
+          final long data_val_1 = Platform.getLong(base, offStripe + 40);
+          final long data_key_0 = data_val_0 ^ SECRETS[offSec + 32];
+          final long data_key_1 = data_val_0 ^ SECRETS[offSec + 40];
           /* swap adjacent lanes */
           acc_4 += data_val_1 + (0xFFFFFFFFL & data_key_0) * (data_key_0 >>> 32);
           acc_5 += data_val_0 + (0xFFFFFFFFL & data_key_1) * (data_key_1 >>> 32);
         }
         {
-          final long data_val_0 = Platform.getLong(base, offStripe + 8L * 6);
-          final long data_val_1 = Platform.getLong(base, offStripe + 8L * 7);
-          final long data_key_0 = data_val_1 ^ SECRETS[offSec + 8 * 6];
-          final long data_key_1 = data_val_1 ^ SECRETS[offSec + 8 * 7];
+          final long data_val_0 = Platform.getLong(base, offStripe + 48);
+          final long data_val_1 = Platform.getLong(base, offStripe + 56);
+          final long data_key_0 = data_val_1 ^ SECRETS[offSec + 48];
+          final long data_key_1 = data_val_1 ^ SECRETS[offSec + 56];
           /* swap adjacent lanes */
           acc_6 += data_val_1 + (0xFFFFFFFFL & data_key_0) * (data_key_0 >>> 32);
           acc_7 += data_val_0 + (0xFFFFFFFFL & data_key_1) * (data_key_1 >>> 32);
@@ -328,12 +328,12 @@ public final class XXH3 {
       final int offSec = 192 - 64;
       acc_0 = (acc_0 ^ (acc_0 >>> 47) ^ SECRETS[offSec]) * XXH_PRIME32_1;
       acc_1 = (acc_1 ^ (acc_1 >>> 47) ^ SECRETS[offSec + 8]) * XXH_PRIME32_1;
-      acc_2 = (acc_2 ^ (acc_2 >>> 47) ^ SECRETS[offSec + 8 * 2]) * XXH_PRIME32_1;
-      acc_3 = (acc_3 ^ (acc_3 >>> 47) ^ SECRETS[offSec + 8 * 3]) * XXH_PRIME32_1;
-      acc_4 = (acc_4 ^ (acc_4 >>> 47) ^ SECRETS[offSec + 8 * 4]) * XXH_PRIME32_1;
-      acc_5 = (acc_5 ^ (acc_5 >>> 47) ^ SECRETS[offSec + 8 * 5]) * XXH_PRIME32_1;
-      acc_6 = (acc_6 ^ (acc_6 >>> 47) ^ SECRETS[offSec + 8 * 6]) * XXH_PRIME32_1;
-      acc_7 = (acc_7 ^ (acc_7 >>> 47) ^ SECRETS[offSec + 8 * 7]) * XXH_PRIME32_1;
+      acc_2 = (acc_2 ^ (acc_2 >>> 47) ^ SECRETS[offSec + 16]) * XXH_PRIME32_1;
+      acc_3 = (acc_3 ^ (acc_3 >>> 47) ^ SECRETS[offSec + 24]) * XXH_PRIME32_1;
+      acc_4 = (acc_4 ^ (acc_4 >>> 47) ^ SECRETS[offSec + 32]) * XXH_PRIME32_1;
+      acc_5 = (acc_5 ^ (acc_5 >>> 47) ^ SECRETS[offSec + 40]) * XXH_PRIME32_1;
+      acc_6 = (acc_6 ^ (acc_6 >>> 47) ^ SECRETS[offSec + 48]) * XXH_PRIME32_1;
+      acc_7 = (acc_7 ^ (acc_7 >>> 47) ^ SECRETS[offSec + 56]) * XXH_PRIME32_1;
     }
 
     /* last partial block */
