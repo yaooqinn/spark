@@ -63,6 +63,12 @@
       <artifactId>spark-tags_${scala.binary.version}</artifactId>
     </dependency>
 
+    <dependency>
+      <groupId>net.openhft</groupId>
+      <artifactId>zero-allocation-hashing</artifactId>
+      <version>0.16</version>
+    </dependency>
+
     <!--
       This spark-tags test-dep is needed even though it isn't used in this module, otherwise testing-cmds that exclude
       them will yield errors.

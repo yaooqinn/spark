@@ -20,7 +20,7 @@ package org.apache.spark.sql
 import java.util.Random
 
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
-import org.apache.spark.sql.catalyst.expressions.{HiveHasher, XXH3, XXH64}
+import org.apache.spark.sql.catalyst.expressions.{HiveHasher, XXH3, XXH3v2, XXH64}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.unsafe.hash.Murmur3_x86_32
 
@@ -86,6 +86,17 @@ object HashByteArrayBenchmark extends BenchmarkBase {
         var i = 0
         while (i < numArrays) {
           sum += XXH3.hashUnsafeBytes(arrays(i), Platform.BYTE_ARRAY_OFFSET, length, 42)
+          i += 1
+        }
+      }
+    }
+
+    benchmark.addCase("xxHash3 v2") { _: Int =>
+      var sum = 0L
+      for (_ <- 0L until iters) {
+        var i = 0
+        while (i < numArrays) {
+          sum += XXH3v2.hashUnsafeBytes(arrays(i), Platform.BYTE_ARRAY_OFFSET, length, 42)
           i += 1
         }
       }
