@@ -1,0 +1,18 @@
+OpenJDK 64-Bit Server VM 17.0.13+11-LTS on Linux 6.5.0-1025-azure
+AMD EPYC 7763 64-Core Processor
+sha2 case 1:                                          Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------------------
+Sha2 w/ foldable=false, nullable=true, nested=false            1312           1341          41          0.0      160191.4       1.0X
+Sha2 w/ foldable=false, nullable=false, nested=false           1261           1281          28          0.0      153962.1       1.0X
+Sha2 w/ foldable=true, nullable=true, nested=false             1064           1091          38          0.0      129882.0       1.2X
+Sha2 w/ foldable=true, nullable=false, nested=false            1046           1053          10          0.0      127647.0       1.3X
+
+OpenJDK 64-Bit Server VM 17.0.13+11-LTS on Linux 6.5.0-1025-azure
+AMD EPYC 7763 64-Core Processor
+sha2 case 2:                                         Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+-----------------------------------------------------------------------------------------------------------------------------------
+Sha2 w/ foldable=false, nullable=false, nested=true            449            468          14          0.0       54808.5       1.0X
+Sha2 w/ foldable=false, nullable=true, nested=true             442            454           7          0.0       53981.2       1.0X
+Sha2 w/ foldable=true, nullable=false, nested=true             437            442           6          0.0       53339.0       1.0X
+Sha2 w/ foldable=true, nullable=true, nested=true               60             69           6          0.1        7302.7       7.5X
+

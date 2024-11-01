@@ -24,7 +24,7 @@ import java.util.zip.CRC32
 import scala.annotation.tailrec
 
 import org.apache.commons.codec.digest.DigestUtils
-import org.apache.commons.codec.digest.MessageDigestAlgorithms
+import org.apache.commons.codec.digest.MessageDigestAlgorithms.SHA_224
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
@@ -32,6 +32,7 @@ import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
 import org.apache.spark.sql.catalyst.expressions.Cast._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
+import org.apache.spark.sql.catalyst.expressions.objects.StaticInvoke
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, MapData}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants._
@@ -68,14 +69,51 @@ case class Md5(child: Expression)
   override def inputTypes: Seq[DataType] = Seq(BinaryType)
 
   protected override def nullSafeEval(input: Any): Any =
-    UTF8String.fromString(DigestUtils.md5Hex(input.asInstanceOf[Array[Byte]]))
+    SparkDigestUtils.md5Hex(input.asInstanceOf[Array[Byte]])
 
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, c =>
-      s"UTF8String.fromString(${classOf[DigestUtils].getName}.md5Hex($c))")
+    val clz = SparkDigestUtils.getClass.getName.stripSuffix("$")
+    defineCodeGen(ctx, ev, c => s"$clz.md5Hex($c)")
   }
 
   override protected def withNewChildInternal(newChild: Expression): Md5 = copy(child = newChild)
+}
+
+object SparkDigestUtils {
+  final val VALID_SHA2_LENGTHS = Set(224, 256, 384, 512)
+  def md5Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.md5(bytes), toLowercase = true)
+  }
+
+  def sha224Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.getDigest(SHA_224).digest(bytes), toLowercase = true)
+  }
+
+  def sha256Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha256(bytes), toLowercase = true)
+  }
+
+  def sha384Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha384(bytes), toLowercase = true)
+  }
+
+  def sha512Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha512(bytes), toLowercase = true)
+  }
+
+  def sha1Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha1(bytes), toLowercase = true)
+  }
+
+  def sha2Hex(bytes: Array[Byte], bitLength: Int): UTF8String = {
+    bitLength match {
+      case 224 => sha224Hex(bytes)
+      case 256 | 0 => sha256Hex(bytes)
+      case 384 => sha384Hex(bytes)
+      case 512 => sha512Hex(bytes)
+      case _ => null
+    }
+  }
 }
 
 /**
@@ -101,56 +139,36 @@ case class Md5(child: Expression)
   group = "hash_funcs")
 // scalastyle:on line.size.limit
 case class Sha2(left: Expression, right: Expression)
-  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  extends RuntimeReplaceable
+  with ImplicitCastInputTypes
+  with NullIntolerant
+  with Serializable {
 
   override def dataType: DataType = SQLConf.get.defaultStringType
   override def nullable: Boolean = true
-
   override def inputTypes: Seq[DataType] = Seq(BinaryType, IntegerType)
 
-  protected override def nullSafeEval(input1: Any, input2: Any): Any = {
-    val bitLength = input2.asInstanceOf[Int]
-    val input = input1.asInstanceOf[Array[Byte]]
-    bitLength match {
-      case 224 =>
-        UTF8String.fromString(
-          new DigestUtils(MessageDigestAlgorithms.SHA_224).digestAsHex(input))
-      case 256 | 0 =>
-        UTF8String.fromString(DigestUtils.sha256Hex(input))
-      case 384 =>
-        UTF8String.fromString(DigestUtils.sha384Hex(input))
-      case 512 =>
-        UTF8String.fromString(DigestUtils.sha512Hex(input))
-      case _ => null
+  override lazy val replacement: Expression = {
+    if (right.foldable) {
+      var bitLen = right.eval()
+      if (bitLen == 0) bitLen = 256
+      if (SparkDigestUtils.VALID_SHA2_LENGTHS.contains(bitLen.asInstanceOf[Int])) {
+        StaticInvoke(
+          SparkDigestUtils.getClass, dataType, s"sha${bitLen}Hex", Seq(left), Seq(BinaryType))
+      } else {
+        Literal.create(null, dataType)
+      }
+    } else {
+      StaticInvoke(
+        SparkDigestUtils.getClass, dataType, s"sha2Hex", Seq(left, right), inputTypes)
     }
   }
 
-  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    val digestUtils = classOf[DigestUtils].getName
-    val messageDigestAlgorithms = classOf[MessageDigestAlgorithms].getName
-    nullSafeCodeGen(ctx, ev, (eval1, eval2) => {
-      s"""
-        if ($eval2 == 224) {
-          ${ev.value} = UTF8String.fromString(
-                          new $digestUtils($messageDigestAlgorithms.SHA_224).digestAsHex($eval1));
-        } else if ($eval2 == 256 || $eval2 == 0) {
-          ${ev.value} =
-            UTF8String.fromString($digestUtils.sha256Hex($eval1));
-        } else if ($eval2 == 384) {
-          ${ev.value} =
-            UTF8String.fromString($digestUtils.sha384Hex($eval1));
-        } else if ($eval2 == 512) {
-          ${ev.value} =
-            UTF8String.fromString($digestUtils.sha512Hex($eval1));
-        } else {
-          ${ev.isNull} = true;
-        }
-      """
-    })
+  override protected def withNewChildrenInternal(newChildren: IndexedSeq[Expression]): Sha2 = {
+    copy(left = newChildren(0), right = newChildren(1))
   }
 
-  override protected def withNewChildrenInternal(newLeft: Expression, newRight: Expression): Sha2 =
-    copy(left = newLeft, right = newRight)
+  override def children: Seq[Expression] = Seq(left, right)
 }
 
 /**
@@ -173,13 +191,13 @@ case class Sha1(child: Expression)
 
   override def inputTypes: Seq[DataType] = Seq(BinaryType)
 
-  protected override def nullSafeEval(input: Any): Any =
-    UTF8String.fromString(DigestUtils.sha1Hex(input.asInstanceOf[Array[Byte]]))
+  protected override def nullSafeEval(input: Any): Any = {
+    SparkDigestUtils.sha1Hex(input.asInstanceOf[Array[Byte]])
+  }
 
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, c =>
-      s"UTF8String.fromString(${classOf[DigestUtils].getName}.sha1Hex($c))"
-    )
+    val du = SparkDigestUtils.getClass.getName.stripSuffix("$")
+    defineCodeGen(ctx, ev, c => s"$du.sha1Hex($c)")
   }
 
   override protected def withNewChildInternal(newChild: Expression): Sha1 = copy(child = newChild)

@@ -4550,8 +4550,8 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
 
   test("SPARK-39012: SparkSQL cast partition value does not support all data types") {
     withTempDir { dir =>
-      val binary1 = Hex.hex(UTF8String.fromString("Spark").getBytes).getBytes
-      val binary2 = Hex.hex(UTF8String.fromString("SQL").getBytes).getBytes
+      val binary1 = Hex.hex(UTF8String.fromString("Spark").getBytes, false).getBytes
+      val binary2 = Hex.hex(UTF8String.fromString("SQL").getBytes, false).getBytes
       val data = Seq[(Int, Boolean, Array[Byte])](
         (1, false, binary1),
         (2, true, binary2)

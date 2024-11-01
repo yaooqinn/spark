@@ -425,7 +425,7 @@ object ToStringBase {
         (array: Array[Byte]) =>
           UTF8String.fromString(java.util.Base64.getEncoder.withoutPadding().encodeToString(array))
       case Some(BinaryOutputStyle.HEX) =>
-        (array: Array[Byte]) => Hex.hex(array)
+        (array: Array[Byte]) => Hex.hex(array, toLowercase = false)
       case _ =>
         (array: Array[Byte]) => UTF8String.fromString(SparkStringUtils.getHexString(array))
     }

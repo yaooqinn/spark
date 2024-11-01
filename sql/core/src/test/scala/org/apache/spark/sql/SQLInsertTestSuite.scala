@@ -347,7 +347,7 @@ trait SQLInsertTestSuite extends QueryTest with SQLTestUtils with AdaptiveSparkP
   test("SPARK-33474: Support typed literals as partition spec values") {
     withTable("t1") {
       val binaryStr = "Spark SQL"
-      val binaryHexStr = Hex.hex(UTF8String.fromString(binaryStr).getBytes).toString
+      val binaryHexStr = Hex.hex(UTF8String.fromString(binaryStr).getBytes, false).toString
       sql(
         """
           | CREATE TABLE t1(name STRING, part1 DATE, part2 TIMESTAMP, part3 BINARY,

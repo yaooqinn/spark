@@ -2608,7 +2608,7 @@ class DDLParserSuite extends AnalysisTest {
         overwrite = false, ifPartitionNotExists = false)
     }
     val binaryStr = "Spark SQL"
-    val binaryHexStr = Hex.hex(UTF8String.fromString(binaryStr).getBytes).toString
+    val binaryHexStr = Hex.hex(UTF8String.fromString(binaryStr).getBytes, false).toString
     val dateTypeSql = "INSERT INTO t PARTITION(part = date'2019-01-02') VALUES('a')"
     val interval = new CalendarInterval(7, 1, 1000).toString
     val intervalTypeSql = s"INSERT INTO t PARTITION(part = interval'$interval') VALUES('a')"

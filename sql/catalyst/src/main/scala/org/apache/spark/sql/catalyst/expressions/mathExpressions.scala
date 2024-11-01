@@ -1018,8 +1018,10 @@ case class Bin(child: Expression)
 }
 
 object Hex {
-  private final val hexDigits =
+  private final val HEX_DIGITS_UPPER =
     Array[Byte]('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F')
+  private final val HEX_DIGITS_LOWER =
+    Array[Byte]('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f')
 
   // lookup table to translate '0' -> 0 ... 'F'/'f' -> 15
   val unhexDigits = {
@@ -1030,7 +1032,11 @@ object Hex {
     array
   }
 
-  def hex(bytes: Array[Byte]): UTF8String = {
+  def hex(bytes: Array[Byte], toLowercase: Boolean): UTF8String = {
+    if (toLowercase) lowerHex(bytes) else upperHex(bytes)
+  }
+
+  private def upperHex(bytes: Array[Byte]): UTF8String = {
     val length = bytes.length
     if (length == 0) {
       return UTF8String.EMPTY_UTF8
@@ -1042,8 +1048,27 @@ object Hex {
     val value = new Array[Byte](targetLength.toInt)
     var i = 0
     while (i < length) {
-      value(i * 2) = hexDigits((bytes(i) & 0xF0) >> 4)
-      value(i * 2 + 1) = hexDigits(bytes(i) & 0x0F)
+      value(i * 2) = HEX_DIGITS_UPPER((bytes(i) & 0xF0) >> 4)
+      value(i * 2 + 1) = HEX_DIGITS_UPPER(bytes(i) & 0x0F)
+      i += 1
+    }
+    UTF8String.fromBytes(value)
+  }
+
+  private def lowerHex(bytes: Array[Byte]): UTF8String = {
+    val length = bytes.length
+    if (length == 0) {
+      return UTF8String.EMPTY_UTF8
+    }
+    val targetLength = length * 2L
+    if (targetLength > Int.MaxValue) {
+      throw QueryExecutionErrors.tooManyArrayElementsError(targetLength, Int.MaxValue)
+    }
+    val value = new Array[Byte](targetLength.toInt)
+    var i = 0
+    while (i < length) {
+      value(i * 2) = HEX_DIGITS_LOWER((bytes(i) & 0xF0) >> 4)
+      value(i * 2 + 1) = HEX_DIGITS_LOWER(bytes(i) & 0x0F)
       i += 1
     }
     UTF8String.fromBytes(value)
@@ -1057,7 +1082,7 @@ object Hex {
     val value = new Array[Byte](len)
     var i = len - 1
     while (i >= 0) {
-      value(i) = hexDigits((numBuf & 0xF).toInt)
+      value(i) = HEX_DIGITS_UPPER((numBuf & 0xF).toInt)
       numBuf >>>= 4
       i -= 1
     }
@@ -1123,15 +1148,16 @@ case class Hex(child: Expression)
 
   protected override def nullSafeEval(num: Any): Any = child.dataType match {
     case LongType => Hex.hex(num.asInstanceOf[Long])
-    case BinaryType => Hex.hex(num.asInstanceOf[Array[Byte]])
-    case _: StringType => Hex.hex(num.asInstanceOf[UTF8String].getBytes)
+    case BinaryType => Hex.hex(num.asInstanceOf[Array[Byte]], toLowercase = false)
+    case _: StringType => Hex.hex(num.asInstanceOf[UTF8String].getBytes, toLowercase = false)
   }
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     nullSafeCodeGen(ctx, ev, (c) => {
       val hex = Hex.getClass.getName.stripSuffix("$")
       s"${ev.value} = " + (child.dataType match {
-        case _: StringType => s"""$hex.hex($c.getBytes());"""
+        case _: StringType => s"""$hex.hex($c.getBytes(), false);"""
+        case _: BinaryType => s"""$hex.hex($c, false);"""
         case _ => s"""$hex.hex($c);"""
       })
     })
