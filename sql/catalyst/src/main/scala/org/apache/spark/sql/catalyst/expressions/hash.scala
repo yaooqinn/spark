@@ -80,39 +80,12 @@ case class Md5(child: Expression)
 }
 
 object SparkDigestUtils {
-  final val VALID_SHA2_LENGTHS = Set(224, 256, 384, 512)
   def md5Hex(bytes: Array[Byte]): UTF8String = {
     Hex.hex(DigestUtils.md5(bytes), toLowercase = true)
   }
 
-  def sha224Hex(bytes: Array[Byte]): UTF8String = {
-    Hex.hex(DigestUtils.getDigest(SHA_224).digest(bytes), toLowercase = true)
-  }
-
-  def sha256Hex(bytes: Array[Byte]): UTF8String = {
-    Hex.hex(DigestUtils.sha256(bytes), toLowercase = true)
-  }
-
-  def sha384Hex(bytes: Array[Byte]): UTF8String = {
-    Hex.hex(DigestUtils.sha384(bytes), toLowercase = true)
-  }
-
-  def sha512Hex(bytes: Array[Byte]): UTF8String = {
-    Hex.hex(DigestUtils.sha512(bytes), toLowercase = true)
-  }
-
   def sha1Hex(bytes: Array[Byte]): UTF8String = {
     Hex.hex(DigestUtils.sha1(bytes), toLowercase = true)
-  }
-
-  def sha2Hex(bytes: Array[Byte], bitLength: Int): UTF8String = {
-    bitLength match {
-      case 224 => sha224Hex(bytes)
-      case 256 | 0 => sha256Hex(bytes)
-      case 384 => sha384Hex(bytes)
-      case 512 => sha512Hex(bytes)
-      case _ => null
-    }
   }
 }
 
@@ -147,28 +120,57 @@ case class Sha2(left: Expression, right: Expression)
   override def dataType: DataType = SQLConf.get.defaultStringType
   override def nullable: Boolean = true
   override def inputTypes: Seq[DataType] = Seq(BinaryType, IntegerType)
+  override def children: Seq[Expression] = Seq(left, right)
 
   override lazy val replacement: Expression = {
     if (right.foldable) {
       var bitLen = right.eval()
       if (bitLen == 0) bitLen = 256
-      if (SparkDigestUtils.VALID_SHA2_LENGTHS.contains(bitLen.asInstanceOf[Int])) {
-        StaticInvoke(
-          SparkDigestUtils.getClass, dataType, s"sha${bitLen}Hex", Seq(left), Seq(BinaryType))
+      if (Sha2.VALID_SHA2_LENGTHS.contains(bitLen.asInstanceOf[Int])) {
+        StaticInvoke(Sha2.getClass, dataType, s"sha2Hex", children, inputTypes) {
+          self: NullIntolerant =>
+        }
       } else {
         Literal.create(null, dataType)
       }
     } else {
-      StaticInvoke(
-        SparkDigestUtils.getClass, dataType, s"sha2Hex", Seq(left, right), inputTypes)
+      StaticInvoke(Sha2.getClass, dataType, s"sha2Hex", Seq(left, right), inputTypes)
     }
   }
 
   override protected def withNewChildrenInternal(newChildren: IndexedSeq[Expression]): Sha2 = {
     copy(left = newChildren(0), right = newChildren(1))
   }
+}
 
-  override def children: Seq[Expression] = Seq(left, right)
+object Sha2 {
+  final val VALID_SHA2_LENGTHS = Set(224, 256, 384, 512)
+
+  def sha224Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.getDigest(SHA_224).digest(bytes), toLowercase = true)
+  }
+
+  def sha256Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha256(bytes), toLowercase = true)
+  }
+
+  def sha384Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha384(bytes), toLowercase = true)
+  }
+
+  def sha512Hex(bytes: Array[Byte]): UTF8String = {
+    Hex.hex(DigestUtils.sha512(bytes), toLowercase = true)
+  }
+
+  def sha2Hex(bytes: Array[Byte], bitLength: Int): UTF8String = {
+    bitLength match {
+      case 224 => sha224Hex(bytes)
+      case 256 | 0 => sha256Hex(bytes)
+      case 384 => sha384Hex(bytes)
+      case 512 => sha512Hex(bytes)
+      case _ => null
+    }
+  }
 }
 
 /**

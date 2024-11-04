@@ -304,7 +304,8 @@ class V2ExpressionBuilder(e: Expression, isPredicate: Boolean = false) extends L
     case _: Crc32 => generateExpressionWithName("CRC32", expr, isPredicate)
     case _: Md5 => generateExpressionWithName("MD5", expr, isPredicate)
     case _: Sha1 => generateExpressionWithName("SHA1", expr, isPredicate)
-    case _: Sha2 => generateExpressionWithName("SHA2", expr, isPredicate)
+    case s: StaticInvoke if s.staticObject == Sha2.getClass =>
+      generateExpressionWithName("SHA2", Sha2(s.children.head, s.children.last), isPredicate)
     // TODO supports other expressions
     case ApplyFunctionExpression(function, children) =>
       val childrenExpressions = children.flatMap(generateExpression(_))
