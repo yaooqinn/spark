@@ -935,6 +935,7 @@ class AdaptiveQueryExecSuite
           val error = intercept[SparkException] {
             joined.collect()
           }
+          logError(error.toString)
           assert((Seq(error) ++ Option(error.getCause) ++ error.getSuppressed()).exists(
             e => e.getMessage() != null && e.getMessage().contains("coalesce test error")))
 
