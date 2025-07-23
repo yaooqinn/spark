@@ -50,6 +50,11 @@ on:
         description: 'Number of job splits'
         required: true
         default: '1'
+      create-pr:
+        type: boolean
+        description: 'Create a pull request with the results'
+        required: true
+        default: false
 
 jobs:
   matrix-gen:
@@ -196,6 +201,14 @@ jobs:
         # See also https://github.com/actions/upload-artifact#maintaining-file-permissions-and-case-sensitive-files
         echo "Preparing the benchmark results:"
         tar -cvf benchmark-results-${{ inputs.jdk }}-${{ inputs.scala }}.tar `git diff --name-only` `git ls-files --others --exclude=tpcds-sf-1 --exclude=tpcds-sf-1-text --exclude-standard`
+    - name: Create a pull request with the results
+      if: inputs.create-pr == 'true'
+      run: |
+        git config --local user.name "${{ github.actor }}"
+        git config --local user.email "${{ github.event.pusher.email || format('{0}@users.noreply.github.com', github.actor) }}"
+        git add -A
+        git commit -m "Benchmark results for ${{ inputs.class }} (JDK ${{ inputs.jdk }}, Scala ${{ inputs.scala }}, split ${{ matrix.split }} of ${{ inputs.num-splits }})"
+        git push origin HEAD:{{ inputs.branch}}
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       with:
