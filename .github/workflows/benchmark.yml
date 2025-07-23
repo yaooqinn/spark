@@ -208,7 +208,7 @@ jobs:
         git config --local user.email "${{ github.event.pusher.email || format('{0}@users.noreply.github.com', github.actor) }}"
         git add -A
         git commit -m "Benchmark results for ${{ inputs.class }} (JDK ${{ inputs.jdk }}, Scala ${{ inputs.scala }}, split ${{ matrix.split }} of ${{ inputs.num-splits }})"
-        git push origin HEAD:${{ inputs.branch }}
+        git push origin ${{ github.ref_name }}:${{ github.ref_name }}
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       with:
