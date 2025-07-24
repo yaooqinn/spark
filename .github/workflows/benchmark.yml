@@ -210,12 +210,17 @@ jobs:
         git commit -m "Benchmark results for ${{ inputs.class }} (JDK ${{ inputs.jdk }}, Scala ${{ inputs.scala }}, split ${{ matrix.split }} of ${{ inputs.num-splits }})"
         
         MAX_RETRIES=5
-        SLEEP_TIME=100
         for i in $(seq 1 $MAX_RETRIES); do
           echo "Attempt $i to push..."
-          git fetch origin ${{ github.ref_name }} 
-          
-        git push origin ${{ github.ref_name }}:${{ github.ref_name }}
+          git fetch origin ${{ github.ref_name }}
+          git rebase origin/${{ github.ref_name }}
+          if git push origin ${{ github.ref_name }}:${{ github.ref_name }}; then
+            echo "Push successful."
+            break
+          else
+            echo "Push failed, retrying in 3 seconds..."
+            sleep 3
+          fi
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       with:
