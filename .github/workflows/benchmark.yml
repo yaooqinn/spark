@@ -208,6 +208,13 @@ jobs:
         git config --local user.email "${{ github.event.pusher.email || format('{0}@users.noreply.github.com', github.actor) }}"
         git add -A
         git commit -m "Benchmark results for ${{ inputs.class }} (JDK ${{ inputs.jdk }}, Scala ${{ inputs.scala }}, split ${{ matrix.split }} of ${{ inputs.num-splits }})"
+        
+        MAX_RETRIES=5
+        SLEEP_TIME=100
+        for i in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt $i to push..."
+          git fetch origin ${{ github.ref_name }} 
+          
         git push origin ${{ github.ref_name }}:${{ github.ref_name }}
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
