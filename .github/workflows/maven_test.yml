@@ -125,6 +125,7 @@ jobs:
       HIVE_PROFILE: ${{ matrix.hive }}
       SPARK_LOCAL_IP: localhost
       GITHUB_PREV_SHA: ${{ github.event.before }}
+      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
     steps:
       - name: Checkout Spark repository
         uses: actions/checkout@v4
