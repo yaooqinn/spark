@@ -66,24 +66,5 @@ object ApacheRowConverter {
     new ApacheRow(values)
   }
 
-  /**
-   * Convert a GenericInternalRow to an ApacheRow.
-   */
-  def toApacheRow(genericRow: GenericInternalRow, schema: StructType): ApacheRow = {
-    ApacheRow.fromInternalRow(genericRow, schema)
-  }
 
-  /**
-   * Convert any InternalRow to an ApacheRow.
-   */
-  def toApacheRow(row: InternalRow, schema: StructType): ApacheRow = {
-    ApacheRow.fromInternalRow(row, schema)
-  }
-
-  /**
-   * Convert any InternalRow to an ApacheRow using field types.
-   */
-  def toApacheRow(row: InternalRow, fieldTypes: Seq[DataType]): ApacheRow = {
-    ApacheRow.fromInternalRow(row, fieldTypes)
-  }
 }
