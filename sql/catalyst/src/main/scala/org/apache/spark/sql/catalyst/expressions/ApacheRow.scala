@@ -21,6 +21,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types._
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * An Apache-standard row format implementation that serves as an alternative to UnsafeRow.
@@ -58,7 +59,7 @@ class ApacheRow(val values: Array[Any]) extends BaseGenericInternalRow {
   override protected def genericGet(ordinal: Int): Any = values(ordinal)
 
   override def toSeq(fieldTypes: Seq[DataType]): Seq[Any] = {
-    values.clone().toSeq
+    values.clone().toImmutableArraySeq
   }
 
   override def numFields: Int = if (values == null) 0 else values.length
