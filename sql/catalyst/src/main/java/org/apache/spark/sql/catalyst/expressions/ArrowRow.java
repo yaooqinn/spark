@@ -48,6 +48,29 @@ import org.apache.spark.unsafe.types.GeometryVal;
  * columnar memory layout, making it efficient for interoperability with Arrow-based systems
  * and libraries.
  *
+ * <h3>Usage Example:</h3>
+ * <pre>{@code
+ * // Create from VectorSchemaRoot
+ * VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator);
+ * ArrowRow row = new ArrowRow(root);
+ * row.setRowId(0);
+ * int value = row.getInt(0);
+ *
+ * // Create from ColumnVector array
+ * ColumnVector[] columns = new ColumnVector[] { new ArrowColumnVector(vector) };
+ * ArrowRow row = new ArrowRow(columns);
+ * row.rowId = 0;
+ * String str = row.getUTF8String(0).toString();
+ * }</pre>
+ *
+ * <h3>Design Notes:</h3>
+ * <ul>
+ * <li>ArrowRow is read-only. Calls to {@code update()} or {@code setNullAt()} will throw
+ *     {@link SparkUnsupportedOperationException}.</li>
+ * <li>The {@code copy()} method creates a deep copy as a {@link GenericInternalRow}.</li>
+ * <li>Multiple rows can share the same column vectors; use {@code rowId} to access different rows.</li>
+ * </ul>
+ *
  * @since 4.0.0
  */
 @DeveloperApi
