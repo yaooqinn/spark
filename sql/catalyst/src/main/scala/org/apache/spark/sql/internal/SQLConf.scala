@@ -939,6 +939,17 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val SHUFFLE_ADAPTIVE_COMPRESSION_ENABLED =
+    buildConf("spark.sql.shuffle.adaptiveCompression.enabled")
+      .doc("When true, Spark selects the shuffle compression codec per exchange based on " +
+        "output schema characteristics. String-dominant schemas (>= 60% estimated byte width " +
+        "from string/binary columns) use ZSTD for higher compression ratio; numeric-dominant " +
+        "schemas use LZ4 for lower latency. When false, the global " +
+        "spark.io.compression.codec is used for all shuffles.")
+      .version("4.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
   val SHUFFLE_TARGET_POSTSHUFFLE_INPUT_SIZE =
     buildConf("spark.sql.adaptive.shuffle.targetPostShuffleInputSize")
       .internal()
@@ -7236,6 +7247,9 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
 
   def shuffleChecksumMismatchQueryLevelRollbackEnabled: Boolean =
     getConf(SHUFFLE_CHECKSUM_MISMATCH_QUERY_LEVEL_ROLLBACK_ENABLED)
+
+  def shuffleAdaptiveCompressionEnabled: Boolean =
+    getConf(SHUFFLE_ADAPTIVE_COMPRESSION_ENABLED)
 
   def allowCollationsInMapKeys: Boolean = getConf(ALLOW_COLLATIONS_IN_MAP_KEYS)
 

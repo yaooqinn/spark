@@ -241,6 +241,17 @@ case class ShuffleExchangeExec(
    */
   @transient
   lazy val shuffleDependency : ShuffleDependency[Int, InternalRow, InternalRow] = {
+    // Apply adaptive compression codec selection if enabled
+    if (SQLConf.get.shuffleAdaptiveCompressionEnabled) {
+      val selectedCodec = AdaptiveCompressionSelector.selectCodec(child.output)
+      val conf = SparkEnv.get.conf
+      val currentCodec = conf.get(config.IO_COMPRESSION_CODEC)
+      if (selectedCodec != currentCodec) {
+        logInfo(s"Adaptive shuffle compression: switching codec from $currentCodec " +
+          s"to $selectedCodec for exchange with ${child.output.size} columns")
+        conf.set(config.IO_COMPRESSION_CODEC.key, selectedCodec)
+      }
+    }
     val dep = ShuffleExchangeExec.prepareShuffleDependency(
       inputRDD,
       child.output,
