@@ -2903,6 +2903,15 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
           checkAnswer(spark.table("t"), Seq(Row(null)))
         }
       }
+      // Legacy config: allows null even in ANSI mode
+      withSQLConf(
+        SQLConf.LEGACY_NO_NULL_CHECK_FOR_FILE_SOURCE_INSERT.key -> "true") {
+        withTable("t") {
+          sql(s"CREATE TABLE t(i INT NOT NULL) USING $format")
+          sql("INSERT INTO t VALUES(null)")
+          checkAnswer(spark.table("t"), Seq(Row(null)))
+        }
+      }
     }
   }
 

@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+-Dsbt.repository.config=project/repositories
 -J-Xmx8g
 -J-Xms4g
 -J-XX:MaxMetaspaceSize=1g
