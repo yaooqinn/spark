@@ -107,8 +107,17 @@ case class CreateDataSourceTableCommand(table: CatalogTable, ignoreIfExists: Boo
         table.copy(schema = new StructType(), partitionColumnNames = Nil)
 
       case _ =>
+        // Preserve the original user-specified schema if available.
+        // DataSource.resolveRelation() calls dataSchema.asNullable which strips NOT NULL
+        // constraints (both top-level and nested) from the schema. We use the original
+        // user-specified schema to preserve NOT NULL constraints in the metastore.
+        val resolvedSchema = if (table.schema.nonEmpty) {
+          table.schema
+        } else {
+          dataSource.schema
+        }
         table.copy(
-          schema = dataSource.schema,
+          schema = resolvedSchema,
           partitionColumnNames = partitionColumnNames,
           // If metastore partition management for file source tables is enabled, we start off with
           // partition provider hive, but no partitions in the metastore. The user has to call

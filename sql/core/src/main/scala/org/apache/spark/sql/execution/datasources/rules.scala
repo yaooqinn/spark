@@ -470,7 +470,24 @@ object PreprocessTableInsertion extends ResolveInsertionBase {
       insert.partitionSpec, partColNames, tblName, conf.resolver)
 
     val staticPartCols = normalizedPartSpec.filter(_._2.isDefined).keySet
-    val expectedColumns = insert.table.output.filterNot(a => staticPartCols.contains(a.name))
+    val expectedColumns = {
+      val cols = insert.table.output.filterNot(a => staticPartCols.contains(a.name))
+      // Restore the original nullability from the catalog table schema.
+      // HadoopFsRelation forces dataSchema.asNullable for safe reads, which strips NOT NULL
+      // constraints (both top-level and nested) from the LogicalRelation output. We restore
+      // the full data types from the catalog schema so that AssertNotNull checks are properly
+      // injected for both top-level columns and nested fields.
+      catalogTable.map { ct =>
+        val catalogFields = ct.schema.fields.map(f => f.name -> f).toMap
+        cols.map { col =>
+          catalogFields.get(col.name) match {
+            case Some(field) =>
+              col.withDataType(field.dataType).withNullability(field.nullable)
+            case None => col
+          }
+        }
+      }.getOrElse(cols)
+    }
 
     val partitionsTrackedByCatalog = catalogTable.isDefined &&
       catalogTable.get.partitionColumnNames.nonEmpty &&

@@ -2851,6 +2851,167 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     }
   }
 
+  test("SPARK-XXXXX: V1 INSERT rejects null into NOT NULL column for file sources") {
+    Seq("parquet", "orc", "json").foreach { format =>
+      withTable("t") {
+        sql(s"CREATE TABLE t(i INT NOT NULL, s STRING NOT NULL) USING $format")
+        // V1 DataSource writes now enforce NOT NULL constraints via AssertNotNull
+        val e1 = intercept[SparkRuntimeException] {
+          sql("INSERT INTO t VALUES(null, 'a')")
+        }
+        assert(e1.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        val e2 = intercept[SparkRuntimeException] {
+          sql("INSERT INTO t VALUES(1, null)")
+        }
+        assert(e2.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        // Valid insert should succeed
+        sql("INSERT INTO t VALUES(1, 'a')")
+        checkAnswer(spark.table("t"), Seq(Row(1, "a")))
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 INSERT NOT NULL enforcement respects storeAssignmentPolicy") {
+    Seq("parquet", "orc").foreach { format =>
+      // ANSI mode (default): rejects null
+      withSQLConf(
+        SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.ANSI.toString) {
+        withTable("t") {
+          sql(s"CREATE TABLE t(i INT NOT NULL) USING $format")
+          val e = intercept[SparkRuntimeException] {
+            sql("INSERT INTO t VALUES(null)")
+          }
+          assert(e.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        }
+      }
+      // STRICT mode: also rejects null (fails at analysis with type mismatch)
+      withSQLConf(
+        SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.STRICT.toString) {
+        withTable("t") {
+          sql(s"CREATE TABLE t(i INT NOT NULL) USING $format")
+          intercept[AnalysisException] {
+            sql("INSERT INTO t VALUES(null)")
+          }
+        }
+      }
+      // LEGACY mode: allows null (no AssertNotNull injected)
+      withSQLConf(
+        SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.LEGACY.toString) {
+        withTable("t") {
+          sql(s"CREATE TABLE t(i INT NOT NULL) USING $format")
+          sql("INSERT INTO t VALUES(null)")
+          checkAnswer(spark.table("t"), Seq(Row(null)))
+        }
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 INSERT rejects null with V2 file source path") {
+    Seq("parquet", "orc").foreach { format =>
+      withSQLConf(SQLConf.USE_V1_SOURCE_LIST.key -> "") {
+        withTable("t") {
+          sql(s"CREATE TABLE t(i INT NOT NULL, s STRING NOT NULL) USING $format")
+          val e = intercept[SparkRuntimeException] {
+            sql("INSERT INTO t VALUES(null, 'a')")
+          }
+          assert(e.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        }
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 INSERT rejects null array element for NOT NULL element type") {
+    Seq("parquet", "orc").foreach { format =>
+      withTable("t") {
+        val schema = new StructType()
+          .add("a", ArrayType(IntegerType, containsNull = false))
+        spark.sessionState.catalog.createTable(
+          CatalogTable(
+            identifier = TableIdentifier("t"),
+            tableType = CatalogTableType.MANAGED,
+            storage = CatalogStorageFormat.empty,
+            schema = schema,
+            provider = Some(format)),
+          ignoreIfExists = false)
+        val e = intercept[SparkRuntimeException] {
+          sql("INSERT INTO t SELECT array(1, null, 3)")
+        }
+        assert(e.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        // Valid insert should succeed
+        sql("INSERT INTO t SELECT array(1, 2, 3)")
+        checkAnswer(spark.table("t"), Seq(Row(Seq(1, 2, 3))))
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 INSERT rejects null struct field for NOT NULL field") {
+    Seq("parquet", "orc").foreach { format =>
+      withTable("t") {
+        val schema = new StructType()
+          .add("s", new StructType()
+            .add("x", IntegerType, nullable = false)
+            .add("y", StringType, nullable = false))
+        spark.sessionState.catalog.createTable(
+          CatalogTable(
+            identifier = TableIdentifier("t"),
+            tableType = CatalogTableType.MANAGED,
+            storage = CatalogStorageFormat.empty,
+            schema = schema,
+            provider = Some(format)),
+          ignoreIfExists = false)
+        val e = intercept[SparkRuntimeException] {
+          sql("INSERT INTO t SELECT named_struct('x', null, 'y', 'hello')")
+        }
+        assert(e.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        // Valid insert should succeed
+        sql("INSERT INTO t SELECT named_struct('x', 1, 'y', 'hello')")
+        checkAnswer(spark.table("t"), Seq(Row(Row(1, "hello"))))
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 INSERT rejects null map value for NOT NULL value type") {
+    Seq("parquet", "orc").foreach { format =>
+      withTable("t") {
+        val schema = new StructType()
+          .add("m", MapType(StringType, IntegerType, valueContainsNull = false))
+        spark.sessionState.catalog.createTable(
+          CatalogTable(
+            identifier = TableIdentifier("t"),
+            tableType = CatalogTableType.MANAGED,
+            storage = CatalogStorageFormat.empty,
+            schema = schema,
+            provider = Some(format)),
+          ignoreIfExists = false)
+        val e = intercept[SparkRuntimeException] {
+          sql("INSERT INTO t SELECT map('a', 1, 'b', null)")
+        }
+        assert(e.getCondition === "NOT_NULL_ASSERT_VIOLATION")
+        // Valid insert should succeed
+        sql("INSERT INTO t SELECT map('a', 1, 'b', 2)")
+        checkAnswer(spark.table("t"), Seq(Row(Map("a" -> 1, "b" -> 2))))
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: V1 DataFrame write ignores NOT NULL schema constraint") {
+    Seq("parquet", "orc").foreach { format =>
+      withTempPath { path =>
+        val data = Seq(Row(null, "hello", 1.0), Row(1, null, 2.0), Row(2, "world", null))
+        val df = spark.createDataFrame(
+          spark.sparkContext.parallelize(data),
+          new StructType()
+            .add("id", IntegerType, nullable = true)
+            .add("name", StringType, nullable = true)
+            .add("value", DoubleType, nullable = true))
+        // V1 DataSource writes do not enforce NOT NULL constraints
+        df.write.mode(SaveMode.Overwrite).format(format).save(path.getCanonicalPath)
+        val result = spark.read.format(format).load(path.getCanonicalPath)
+        checkAnswer(result, data)
+      }
+    }
+  }
+
   test("UNSUPPORTED_OVERWRITE.PATH: Can't overwrite a path that is also being read from") {
     val tableName = "t1"
     withTable(tableName) {
