@@ -132,12 +132,65 @@ $(document).ready(function () {
       ], { paging: false, searching: false, info: false });
       updateBadge("runtime-tab", runtimeData.length);
 
-      // Spark Properties
+      // Spark Properties — highlight non-default values
+      var defaultsEl = document.getElementById("spark-config-defaults");
+      var configDefaults = {};
+      if (defaultsEl) {
+        try { configDefaults = JSON.parse(defaultsEl.textContent); } catch (e) { /* ignore */ }
+      }
+
       var sparkProps = response.sparkProperties || [];
-      initDataTable("spark-props", "spark-props-table", sparkProps, [
-        { title: "Name", width: "35%" },
-        { title: "Value", width: "65%" }
-      ]);
+      var sparkPropsWithDefaults = sparkProps.map(function (prop) {
+        var d = configDefaults.hasOwnProperty(prop[0]) ? configDefaults[prop[0]] : "";
+        return [prop[0], prop[1], d];
+      });
+      var nonDefaultCount = sparkPropsWithDefaults.filter(function (row) {
+        return configDefaults.hasOwnProperty(row[0]) && row[1] !== configDefaults[row[0]];
+      }).length;
+
+      var showNonDefaultOnly = false;
+      $.fn.dataTable.ext.search.push(function (settings, searchData) {
+        if (settings.nTable.id !== "spark-props-table" || !showNonDefaultOnly) return true;
+        var key = searchData[0];
+        return !configDefaults.hasOwnProperty(key) || searchData[1] !== configDefaults[key];
+      });
+
+      initDataTable("spark-props", "spark-props-table", sparkPropsWithDefaults, [
+        { title: "Name", width: "30%" },
+        { title: "Value", width: "35%" },
+        { title: "Default Value", width: "35%" }
+      ], {
+        createdRow: function (row, data) {
+          if (configDefaults.hasOwnProperty(data[0]) && data[1] !== configDefaults[data[0]]) {
+            $(row).addClass("table-warning");
+          }
+        }
+      });
+
+      // Toggle to show only non-default values
+      var sparkWrapper = document.querySelector("#spark-props .dataTables_wrapper");
+      if (sparkWrapper) {
+        var toggleDiv = document.createElement("div");
+        toggleDiv.className = "form-check form-switch mb-2";
+        toggleDiv.innerHTML =
+          '<input class="form-check-input" type="checkbox" id="show-nondefault-only">' +
+          '<label class="form-check-label" for="show-nondefault-only">' +
+          "Show only non-default values (" + nonDefaultCount + ")</label>";
+        sparkWrapper.insertBefore(toggleDiv, sparkWrapper.firstChild);
+        var toggle = document.getElementById("show-nondefault-only");
+        var saved = localStorage.getItem("env-show-nondefault-only");
+        if (saved === "true") {
+          toggle.checked = true;
+          showNonDefaultOnly = true;
+          $("#spark-props-table").DataTable().draw();
+        }
+        toggle.addEventListener("change", function () {
+          showNonDefaultOnly = this.checked;
+          localStorage.setItem("env-show-nondefault-only", String(this.checked));
+          $("#spark-props-table").DataTable().draw();
+        });
+      }
+
       updateBadge("spark-props-tab", sparkProps.length);
 
       // Resource Profiles
