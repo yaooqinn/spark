@@ -36,42 +36,51 @@ import org.apache.spark.sql.internal.SQLConf
  */
 object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with JoinSelectionHelper {
 
+  // Inject a composite bloom filter using all provided join keys for better selectivity.
+  // When a join has multiple equi-join keys (e.g., ON a.k1 = b.k1 AND a.k2 = b.k2),
+  // hashing all keys together produces a much more selective bloom filter than
+  // hashing each key individually.
   private def injectFilter(
-      filterApplicationSideKey: Expression,
+      filterApplicationSideKeys: Seq[Expression],
       filterApplicationSidePlan: LogicalPlan,
-      filterCreationSideKey: Expression,
+      filterCreationSideKeys: Seq[Expression],
       filterCreationSidePlan: LogicalPlan): LogicalPlan = {
     injectBloomFilter(
-      filterApplicationSideKey,
+      filterApplicationSideKeys,
       filterApplicationSidePlan,
-      filterCreationSideKey,
+      filterCreationSideKeys,
       filterCreationSidePlan
     )
   }
 
   private def injectBloomFilter(
-      filterApplicationSideKey: Expression,
+      filterApplicationSideKeys: Seq[Expression],
       filterApplicationSidePlan: LogicalPlan,
-      filterCreationSideKey: Expression,
+      filterCreationSideKeys: Seq[Expression],
       filterCreationSidePlan: LogicalPlan): LogicalPlan = {
+    require(filterApplicationSideKeys.nonEmpty)
+    require(filterApplicationSideKeys.length == filterCreationSideKeys.length)
     // Skip if the filter creation side is too big
     if (filterCreationSidePlan.stats.sizeInBytes > conf.runtimeFilterCreationSideThreshold) {
       return filterApplicationSidePlan
     }
     val rowCount = filterCreationSidePlan.stats.rowCount
+    // Hash all creation-side keys together for a composite bloom filter
     val bloomFilterAgg =
       if (rowCount.isDefined && rowCount.get.longValue > 0L) {
-        new BloomFilterAggregate(new XxHash64(Seq(filterCreationSideKey)), rowCount.get.longValue)
+        new BloomFilterAggregate(
+          new XxHash64(filterCreationSideKeys), rowCount.get.longValue)
       } else {
-        new BloomFilterAggregate(new XxHash64(Seq(filterCreationSideKey)))
+        new BloomFilterAggregate(new XxHash64(filterCreationSideKeys))
       }
 
     val alias = Alias(bloomFilterAgg.toAggregateExpression(), "bloomFilter")()
     val aggregate =
       ConstantFolding(ColumnPruning(Aggregate(Nil, Seq(alias), filterCreationSidePlan)))
     val bloomFilterSubquery = ScalarSubquery(aggregate, Nil)
+    // Hash all application-side keys together to match
     val filter = BloomFilterMightContain(bloomFilterSubquery,
-      new XxHash64(Seq(filterApplicationSideKey)))
+      new XxHash64(filterApplicationSideKeys))
     Filter(filter, filterApplicationSidePlan)
   }
 
@@ -266,12 +275,13 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
     }
   }
 
-  private def hasBloomFilter(plan: LogicalPlan, key: Expression): Boolean = {
+  private def hasBloomFilter(plan: LogicalPlan, keys: Seq[Expression]): Boolean = {
     plan.exists {
       case Filter(condition, _) =>
         splitConjunctivePredicates(condition).exists {
-          case BloomFilterMightContain(_, XxHash64(Seq(valueExpression), _))
-            if valueExpression.fastEquals(key) => true
+          case BloomFilterMightContain(_, XxHash64(hashKeys, _))
+            if hashKeys.length == keys.length &&
+              hashKeys.zip(keys).forall { case (h, k) => h.fastEquals(k) } => true
           case _ => false
         }
       case _ => false
@@ -285,47 +295,81 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
       case join @ ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, left, right, hint) =>
         var newLeft = left
         var newRight = right
-        leftKeys.lazyZip(rightKeys).foreach((l, r) => {
-          // Check if:
-          // 1. There is already a DPP filter on the key
-          // 2. The keys are simple cheap expressions
-          if (filterCounter < numFilterThreshold &&
-            !hasDynamicPruningSubquery(left, right, l, r) &&
-            isSimpleExpression(l) && isSimpleExpression(r)) {
+        // Collect all simple equi-join key pairs that don't already have DPP filters.
+        val eligibleKeyPairs = leftKeys.zip(rightKeys).filter { case (l, r) =>
+          !hasDynamicPruningSubquery(left, right, l, r) &&
+            isSimpleExpression(l) && isSimpleExpression(r)
+        }
+        if (filterCounter < numFilterThreshold && eligibleKeyPairs.nonEmpty) {
+          val hasShuffle = isProbablyShuffleJoin(left, right, hint)
+          if (eligibleKeyPairs.length > 1) {
+            // Multi-key join: inject ONE composite bloom filter using all keys together
+            // for higher selectivity (e.g., hash(ticket_number, item_sk) vs hash(item_sk))
+            val (eligibleLeftKeys, eligibleRightKeys) = eligibleKeyPairs.unzip
             val oldLeft = newLeft
             val oldRight = newRight
-            // Check if:
-            // 1. The current join type supports prune the left side with runtime filter
-            // 2. The current join is a shuffle join or a broadcast join that
-            //    has a shuffle below it
-            // 3. There is no bloom filter on the left key yet
-            val hasShuffle = isProbablyShuffleJoin(left, right, hint)
             if (canPruneLeft(joinType) && (hasShuffle || probablyHasShuffle(left)) &&
-              !hasBloomFilter(newLeft, l)) {
-              extractBeneficialFilterCreatePlan(left, right, l, r).foreach {
-                case (filterCreationSideKey, filterCreationSidePlan) =>
-                  newLeft = injectFilter(l, newLeft, filterCreationSideKey, filterCreationSidePlan)
+              !hasBloomFilter(newLeft, eligibleLeftKeys)) {
+              extractBeneficialFilterCreatePlan(
+                left, right, eligibleLeftKeys.head, eligibleRightKeys.head).foreach {
+                case (_, filterCreationSidePlan) =>
+                  val resolvedCreationKeys = eligibleRightKeys.flatMap { rk =>
+                    findExpressionAndTrackLineageDown(rk, filterCreationSidePlan).map(_._1)
+                  }
+                  if (resolvedCreationKeys.length == eligibleRightKeys.length) {
+                    newLeft = injectFilter(
+                      eligibleLeftKeys, newLeft, resolvedCreationKeys, filterCreationSidePlan)
+                  }
               }
             }
-            // Did we actually inject on the left? If not, try on the right
-            // Check if:
-            // 1. The current join type supports prune the right side with runtime filter
-            // 2. The current join is a shuffle join or a broadcast join that
-            //    has a shuffle below it
-            // 3. There is no bloom filter on the right key yet
             if (newLeft.fastEquals(oldLeft) && canPruneRight(joinType) &&
-              (hasShuffle || probablyHasShuffle(right)) && !hasBloomFilter(newRight, r)) {
-              extractBeneficialFilterCreatePlan(right, left, r, l).foreach {
-                case (filterCreationSideKey, filterCreationSidePlan) =>
-                  newRight = injectFilter(
-                    r, newRight, filterCreationSideKey, filterCreationSidePlan)
+              (hasShuffle || probablyHasShuffle(right)) &&
+              !hasBloomFilter(newRight, eligibleRightKeys)) {
+              extractBeneficialFilterCreatePlan(
+                right, left, eligibleRightKeys.head, eligibleLeftKeys.head).foreach {
+                case (_, filterCreationSidePlan) =>
+                  val resolvedCreationKeys = eligibleLeftKeys.flatMap { lk =>
+                    findExpressionAndTrackLineageDown(lk, filterCreationSidePlan).map(_._1)
+                  }
+                  if (resolvedCreationKeys.length == eligibleLeftKeys.length) {
+                    newRight = injectFilter(
+                      eligibleRightKeys, newRight, resolvedCreationKeys, filterCreationSidePlan)
+                  }
               }
             }
             if (!newLeft.fastEquals(oldLeft) || !newRight.fastEquals(oldRight)) {
               filterCounter = filterCounter + 1
             }
+          } else {
+            // Single-key join: use original per-key logic for backward compatibility
+            eligibleKeyPairs.foreach { case (l, r) =>
+              if (filterCounter < numFilterThreshold) {
+                val oldLeft = newLeft
+                val oldRight = newRight
+                if (canPruneLeft(joinType) && (hasShuffle || probablyHasShuffle(left)) &&
+                  !hasBloomFilter(newLeft, Seq(l))) {
+                  extractBeneficialFilterCreatePlan(left, right, l, r).foreach {
+                    case (filterCreationSideKey, filterCreationSidePlan) =>
+                      newLeft = injectFilter(
+                        Seq(l), newLeft, Seq(filterCreationSideKey), filterCreationSidePlan)
+                  }
+                }
+                if (newLeft.fastEquals(oldLeft) && canPruneRight(joinType) &&
+                  (hasShuffle || probablyHasShuffle(right)) &&
+                  !hasBloomFilter(newRight, Seq(r))) {
+                  extractBeneficialFilterCreatePlan(right, left, r, l).foreach {
+                    case (filterCreationSideKey, filterCreationSidePlan) =>
+                      newRight = injectFilter(
+                        Seq(r), newRight, Seq(filterCreationSideKey), filterCreationSidePlan)
+                  }
+                }
+                if (!newLeft.fastEquals(oldLeft) || !newRight.fastEquals(oldRight)) {
+                  filterCounter = filterCounter + 1
+                }
+              }
+            }
           }
-        })
+        }
         join.withNewChildren(Seq(newLeft, newRight))
     }
   }
