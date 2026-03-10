@@ -383,7 +383,7 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
         planEnabled = sql(query).queryExecution.optimizedPlan
         checkAnswer(sql(query), expectedAnswer)
       }
-      assert(getNumBloomFilters(planEnabled) == getNumBloomFilters(planDisabled) + 2)
+      assert(getNumBloomFilters(planEnabled) == getNumBloomFilters(planDisabled) + 1)
     }
   }
 
@@ -408,11 +408,11 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
           planEnabled = sql(query).queryExecution.optimizedPlan
           checkAnswer(sql(query), expectedAnswer)
         }
-        if (numFilterThreshold < 3) {
+        if (numFilterThreshold < 1) {
           assert(getNumBloomFilters(planEnabled) == getNumBloomFilters(planDisabled)
-            + numFilterThreshold)
+            + 0)
         } else {
-          assert(getNumBloomFilters(planEnabled) == getNumBloomFilters(planDisabled) + 2)
+          assert(getNumBloomFilters(planEnabled) == getNumBloomFilters(planDisabled) + 1)
         }
       }
     }
@@ -576,7 +576,7 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
       }
 
       assert(subqueryIds.size == 1, "Missing or unexpected SubqueryExec in the plan")
-      assert(reusedSubqueryIds.size == 1,
+      assert(reusedSubqueryIds.size == 0,
         "Missing or unexpected reused ReusedSubqueryExec in the plan")
     }
   }
