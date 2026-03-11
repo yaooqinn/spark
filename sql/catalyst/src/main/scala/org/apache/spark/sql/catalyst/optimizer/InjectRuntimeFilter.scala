@@ -122,11 +122,23 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         extract(child, predicateReference, hasHitFilter, hasHitSelectiveFilter, currentPlan,
           targetKey)
       case Filter(condition, child) if isSimpleExpression(condition) =>
+        // Treat BloomFilterMightContain as a selective signal for transitive propagation,
+        // but ONLY when the BF filters on DIFFERENT keys than the current target key.
+        // This prevents circular BFs (A→B triggering reverse B→A on the same join).
+        // Example: q93 has BF on sr_reason_sk (from reason table), and we want to use
+        // that selectivity to create a composite BF on (sr_ticket_number, sr_item_sk)
+        // for the store_sales join — different keys, so transitive propagation fires.
+        val hasTransitiveBF = condition.exists {
+          case BloomFilterMightContain(_, XxHash64(hashKeys, _)) =>
+            !hashKeys.exists(_.semanticEquals(targetKey))
+          case _ => false
+        }
+        val isSelective = isLikelySelective(condition) || hasTransitiveBF
         extract(
           child,
           predicateReference ++ condition.references,
           hasHitFilter = true,
-          hasHitSelectiveFilter = hasHitSelectiveFilter || isLikelySelective(condition),
+          hasHitSelectiveFilter = hasHitSelectiveFilter || isSelective,
           currentPlan,
           targetKey)
       case ExtractEquiJoinKeys(joinType, lkeys, rkeys, _, _, left, right, _) =>
@@ -138,8 +150,13 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         // join keys, but for transitive join keys we need to check the join type.
         // We assume other rules have already pushed predicates through join if possible.
         // So the predicate references won't pass on anymore.
+        // Carry forward hasHitSelectiveFilter from parent when it came from a BF,
+        // so transitive BFs work across intermediate joins (e.g., q50:
+        // BF(sr_returned_date_sk) above store_returns ↔ date_dim join).
         if (left.output.exists(_.semanticEquals(targetKey))) {
-          extract(left, AttributeSet.empty, hasHitFilter = false, hasHitSelectiveFilter = false,
+          extract(left, AttributeSet.empty,
+            hasHitFilter = hasHitSelectiveFilter,
+            hasHitSelectiveFilter = hasHitSelectiveFilter,
             currentPlan = left, targetKey = targetKey).orElse {
             // An example that extract from the right side if the join keys are transitive.
             //     left table: 1, 2, 3
@@ -158,7 +175,9 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
             }
           }
         } else if (right.output.exists(_.semanticEquals(targetKey))) {
-          extract(right, AttributeSet.empty, hasHitFilter = false, hasHitSelectiveFilter = false,
+          extract(right, AttributeSet.empty,
+            hasHitFilter = hasHitSelectiveFilter,
+            hasHitSelectiveFilter = hasHitSelectiveFilter,
             currentPlan = right, targetKey = targetKey).orElse {
             // An example that extract from the left side if the join keys are transitive.
             // left table: 1, 2, 3
@@ -248,17 +267,22 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
       filterApplicationSide: LogicalPlan,
       filterCreationSide: LogicalPlan,
       filterApplicationSideKey: Expression,
-      filterCreationSideKey: Expression): Option[(Expression, LogicalPlan)] = {
+      filterCreationSideKey: Expression
+  ): Option[(Expression, LogicalPlan)] = {
     if (findExpressionAndTrackLineageDown(
-      filterApplicationSideKey, filterApplicationSide).isDefined &&
+        filterApplicationSideKey,
+        filterApplicationSide).isDefined &&
       satisfyByteSizeRequirement(filterApplicationSide)) {
-      extractSelectiveFilterOverScan(filterCreationSide, filterCreationSideKey)
+      extractSelectiveFilterOverScan(
+        filterCreationSide, filterCreationSideKey)
     } else {
       None
     }
   }
 
   // This checks if there is already a DPP filter, as this rule is called just after DPP.
+  // Also looks through non-DPP filters (e.g., injected bloom filters) and projections
+  // to find DPP filters underneath, supporting multi-pass bloom filter injection.
   @tailrec
   private def hasDynamicPruningSubquery(
       left: LogicalPlan,
@@ -271,6 +295,14 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
       case (_, Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _), plan)) =>
         pruningKey.fastEquals(rightKey) ||
           hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
+      case (Filter(_, plan), _) =>
+        hasDynamicPruningSubquery(plan, right, leftKey, rightKey)
+      case (_, Filter(_, plan)) =>
+        hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
+      case (Project(_, child), _) =>
+        hasDynamicPruningSubquery(child, right, leftKey, rightKey)
+      case (_, Project(_, child)) =>
+        hasDynamicPruningSubquery(left, child, leftKey, rightKey)
       case _ => false
     }
   }
@@ -304,21 +336,28 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
           val hasShuffle = isProbablyShuffleJoin(left, right, hint)
           if (eligibleKeyPairs.length > 1) {
             // Multi-key join: inject ONE composite bloom filter using all keys together
-            // for higher selectivity (e.g., hash(ticket_number, item_sk) vs hash(item_sk))
             val (eligibleLeftKeys, eligibleRightKeys) = eligibleKeyPairs.unzip
             val oldLeft = newLeft
             val oldRight = newRight
-            if (canPruneLeft(joinType) && (hasShuffle || probablyHasShuffle(left)) &&
+            if (canPruneLeft(joinType) &&
+              (hasShuffle || probablyHasShuffle(left)) &&
               !hasBloomFilter(newLeft, eligibleLeftKeys)) {
               extractBeneficialFilterCreatePlan(
-                left, right, eligibleLeftKeys.head, eligibleRightKeys.head).foreach {
+                left, right,
+                eligibleLeftKeys.head,
+                eligibleRightKeys.head).foreach {
                 case (_, filterCreationSidePlan) =>
-                  val resolvedCreationKeys = eligibleRightKeys.flatMap { rk =>
-                    findExpressionAndTrackLineageDown(rk, filterCreationSidePlan).map(_._1)
-                  }
-                  if (resolvedCreationKeys.length == eligibleRightKeys.length) {
+                  val resolvedCreationKeys =
+                    eligibleRightKeys.flatMap { rk =>
+                      findExpressionAndTrackLineageDown(
+                        rk, filterCreationSidePlan).map(_._1)
+                    }
+                  if (resolvedCreationKeys.length ==
+                    eligibleRightKeys.length) {
                     newLeft = injectFilter(
-                      eligibleLeftKeys, newLeft, resolvedCreationKeys, filterCreationSidePlan)
+                      eligibleLeftKeys, newLeft,
+                      resolvedCreationKeys,
+                      filterCreationSidePlan)
                   }
               }
             }
@@ -377,7 +416,19 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
   override def apply(plan: LogicalPlan): LogicalPlan = plan match {
     case s: Subquery if s.correlated => plan
     case _ if !conf.runtimeFilterBloomFilterEnabled => plan
-    case _ => tryInjectRuntimeFilter(plan)
+    case _ =>
+      val firstPass = tryInjectRuntimeFilter(plan)
+      if (firstPass.fastEquals(plan)) plan
+      else {
+        // Push injected bloom filters down through
+        // joins/projects so they land on scan nodes. This
+        // enables pass 2 to recognize BF-filtered sides as
+        // selective for transitive composite bloom filter
+        // propagation across join chains.
+        val pushed = PushPredicateThroughJoin(
+          PushPredicateThroughNonJoin(firstPass))
+        tryInjectRuntimeFilter(pushed)
+      }
   }
 
 }
