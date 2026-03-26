@@ -56,7 +56,7 @@ function createRESTEndPointForSQLTab(appId) {
     appId = words[ind + 1];
     newBaseURI = words.slice(0, ind + 2).join("/");
     return newBaseURI + "/api/v1/applications/" + appId +
-      "/sql/?details=false&planDescription=false&offset=0&length=100000";
+      "/sql/?details=false&planDescription=false";
   }
   ind = words.indexOf("history");
   if (ind > 0) {
@@ -65,14 +65,14 @@ function createRESTEndPointForSQLTab(appId) {
     newBaseURI = words.slice(0, ind).join("/");
     if (isNaN(attemptId)) {
       return newBaseURI + "/api/v1/applications/" + appId +
-        "/sql/?details=false&planDescription=false&offset=0&length=100000";
+        "/sql/?details=false&planDescription=false";
     } else {
       return newBaseURI + "/api/v1/applications/" + appId + "/" + attemptId +
-        "/sql/?details=false&planDescription=false&offset=0&length=100000";
+        "/sql/?details=false&planDescription=false";
     }
   }
   return uiRoot + "/api/v1/applications/" + appId +
-    "/sql/?details=false&planDescription=false&offset=0&length=100000";
+    "/sql/?details=false&planDescription=false";
 }
 
 function statusBadge(status) {
