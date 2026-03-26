@@ -32,7 +32,11 @@ function formatDurationSql(milliseconds) {
 
 function formatDateSql(dateStr) {
   if (!dateStr) return "";
-  try { return new Date(dateStr).toLocaleString(); } catch (e) { return dateStr; }
+  try {
+    // Spark REST API returns "2026-03-26T11:39:00.433GMT" — normalize to ISO 8601
+    var normalized = dateStr.replace("GMT", "Z");
+    return new Date(normalized).toLocaleString();
+  } catch (e) { return dateStr; }
 }
 function escapeHtml(str) {
   if (!str) return str;
