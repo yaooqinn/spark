@@ -33,9 +33,11 @@ function formatDurationSql(milliseconds) {
 function formatDateSql(dateStr) {
   if (!dateStr) return "";
   try {
-    // Spark REST API returns "2026-03-26T11:39:00.433GMT" — normalize to ISO 8601
-    var normalized = dateStr.replace("GMT", "Z");
-    return new Date(normalized).toLocaleString();
+    var dt = new Date(dateStr.replace("GMT", "Z"));
+    if (isNaN(dt.getTime())) return dateStr;
+    var pad = function(n) { return n < 10 ? "0" + n : n; };
+    return dt.getFullYear() + "-" + pad(dt.getMonth() + 1) + "-" + pad(dt.getDate()) + " " +
+      pad(dt.getHours()) + ":" + pad(dt.getMinutes()) + ":" + pad(dt.getSeconds());
   } catch (e) { return dateStr; }
 }
 function escapeHtml(str) {
