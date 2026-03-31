@@ -303,8 +303,7 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         if (filterCounter < numFilterThreshold && eligibleKeyPairs.nonEmpty) {
           val hasShuffle = isProbablyShuffleJoin(left, right, hint)
           if (eligibleKeyPairs.length > 1) {
-            // Multi-key join: inject ONE composite bloom filter using all keys together
-            // for higher selectivity (e.g., hash(ticket_number, item_sk) vs hash(item_sk))
+            // Multi-key join: try ONE composite bloom filter using all keys together
             val (eligibleLeftKeys, eligibleRightKeys) = eligibleKeyPairs.unzip
             val oldLeft = newLeft
             val oldRight = newRight
@@ -339,6 +338,35 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
             }
             if (!newLeft.fastEquals(oldLeft) || !newRight.fastEquals(oldRight)) {
               filterCounter = filterCounter + 1
+            }
+            // Fall back to per-key BFs if composite injection didn't happen
+            if (newLeft.fastEquals(oldLeft) && newRight.fastEquals(oldRight)) {
+              eligibleKeyPairs.foreach { case (l, r) =>
+                if (filterCounter < numFilterThreshold) {
+                  val oldL = newLeft
+                  val oldR = newRight
+                  if (canPruneLeft(joinType) && (hasShuffle || probablyHasShuffle(left)) &&
+                    !hasBloomFilter(newLeft, Seq(l))) {
+                    extractBeneficialFilterCreatePlan(left, right, l, r).foreach {
+                      case (filterCreationSideKey, filterCreationSidePlan) =>
+                        newLeft = injectFilter(
+                          Seq(l), newLeft, Seq(filterCreationSideKey), filterCreationSidePlan)
+                    }
+                  }
+                  if (newLeft.fastEquals(oldL) && canPruneRight(joinType) &&
+                    (hasShuffle || probablyHasShuffle(right)) &&
+                    !hasBloomFilter(newRight, Seq(r))) {
+                    extractBeneficialFilterCreatePlan(right, left, r, l).foreach {
+                      case (filterCreationSideKey, filterCreationSidePlan) =>
+                        newRight = injectFilter(
+                          Seq(r), newRight, Seq(filterCreationSideKey), filterCreationSidePlan)
+                    }
+                  }
+                  if (!newLeft.fastEquals(oldL) || !newRight.fastEquals(oldR)) {
+                    filterCounter = filterCounter + 1
+                  }
+                }
+              }
             }
           } else {
             // Single-key join: use original per-key logic for backward compatibility
