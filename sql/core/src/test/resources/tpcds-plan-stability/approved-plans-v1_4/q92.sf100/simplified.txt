@@ -58,5 +58,15 @@ WholeStageCodegen (7)
                         InputAdapter
                           Scan parquet spark_catalog.default.web_sales [ws_item_sk,ws_ext_discount_amt,ws_sold_date_sk]
                             ReusedSubquery [d_date_sk] #1
+                            Subquery #3
+                              ObjectHashAggregate [buf] [bloom_filter_agg(xxhash64(d_date_sk, 42), 73049, 1141755, 0, 0),bloomFilter,buf]
+                                Exchange #7
+                                  ObjectHashAggregate [d_date_sk] [buf,buf]
+                                    WholeStageCodegen (1)
+                                      Project [d_date_sk]
+                                        Filter [d_date,d_date_sk]
+                                          ColumnarToRow
+                                            InputAdapter
+                                              Scan parquet spark_catalog.default.date_dim [d_date_sk,d_date]
                 InputAdapter
                   ReusedExchange [d_date_sk] #5
