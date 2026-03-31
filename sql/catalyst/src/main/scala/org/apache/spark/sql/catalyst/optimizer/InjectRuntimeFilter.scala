@@ -150,13 +150,10 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         // join keys, but for transitive join keys we need to check the join type.
         // We assume other rules have already pushed predicates through join if possible.
         // So the predicate references won't pass on anymore.
-        // Carry forward hasHitSelectiveFilter from parent when it came from a BF,
-        // so transitive BFs work across intermediate joins (e.g., q50:
-        // BF(sr_returned_date_sk) above store_returns ↔ date_dim join).
         if (left.output.exists(_.semanticEquals(targetKey))) {
           extract(left, AttributeSet.empty,
-            hasHitFilter = hasHitSelectiveFilter,
-            hasHitSelectiveFilter = hasHitSelectiveFilter,
+            hasHitFilter = false,
+            hasHitSelectiveFilter = false,
             currentPlan = left, targetKey = targetKey).orElse {
             // An example that extract from the right side if the join keys are transitive.
             //     left table: 1, 2, 3
@@ -176,8 +173,8 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
           }
         } else if (right.output.exists(_.semanticEquals(targetKey))) {
           extract(right, AttributeSet.empty,
-            hasHitFilter = hasHitSelectiveFilter,
-            hasHitSelectiveFilter = hasHitSelectiveFilter,
+            hasHitFilter = false,
+            hasHitSelectiveFilter = false,
             currentPlan = right, targetKey = targetKey).orElse {
             // An example that extract from the left side if the join keys are transitive.
             // left table: 1, 2, 3
@@ -274,15 +271,23 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         filterApplicationSide).isDefined &&
       satisfyByteSizeRequirement(filterApplicationSide)) {
       extractSelectiveFilterOverScan(
-        filterCreationSide, filterCreationSideKey)
+        filterCreationSide, filterCreationSideKey).filter {
+        case (_, creationPlan) =>
+          // Only inject BF when creation side is significantly smaller than application side.
+          // A BF built from a table similar in size to a large application side provides
+          // near-zero filtering benefit (false positive rate approaches 100%).
+          // Skip the ratio check for small tables where BF overhead is negligible.
+          val creationSize = creationPlan.stats.sizeInBytes
+          val applicationSize = filterApplicationSide.stats.sizeInBytes
+          applicationSize < conf.runtimeFilterCreationSideThreshold ||
+            creationSize < applicationSize / 3
+      }
     } else {
       None
     }
   }
 
   // This checks if there is already a DPP filter, as this rule is called just after DPP.
-  // Also looks through non-DPP filters (e.g., injected bloom filters) and projections
-  // to find DPP filters underneath, supporting multi-pass bloom filter injection.
   @tailrec
   private def hasDynamicPruningSubquery(
       left: LogicalPlan,
@@ -295,14 +300,6 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
       case (_, Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _), plan)) =>
         pruningKey.fastEquals(rightKey) ||
           hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
-      case (Filter(_, plan), _) =>
-        hasDynamicPruningSubquery(plan, right, leftKey, rightKey)
-      case (_, Filter(_, plan)) =>
-        hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
-      case (Project(_, child), _) =>
-        hasDynamicPruningSubquery(child, right, leftKey, rightKey)
-      case (_, Project(_, child)) =>
-        hasDynamicPruningSubquery(left, child, leftKey, rightKey)
       case _ => false
     }
   }
@@ -416,19 +413,7 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
   override def apply(plan: LogicalPlan): LogicalPlan = plan match {
     case s: Subquery if s.correlated => plan
     case _ if !conf.runtimeFilterBloomFilterEnabled => plan
-    case _ =>
-      val firstPass = tryInjectRuntimeFilter(plan)
-      if (firstPass.fastEquals(plan)) plan
-      else {
-        // Push injected bloom filters down through
-        // joins/projects so they land on scan nodes. This
-        // enables pass 2 to recognize BF-filtered sides as
-        // selective for transitive composite bloom filter
-        // propagation across join chains.
-        val pushed = PushPredicateThroughJoin(
-          PushPredicateThroughNonJoin(firstPass))
-        tryInjectRuntimeFilter(pushed)
-      }
+    case _ => tryInjectRuntimeFilter(plan)
   }
 
 }

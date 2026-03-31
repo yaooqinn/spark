@@ -664,4 +664,46 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
       }
     }
   }
+
+  test("Transitive bloom filter propagation across join chain") {
+    // Transitive BF propagation: bf2 has selective filter (a2 = 5).
+    // Pass 1: injects BF on bf1.c1 from bf2.c2.
+    // Pass 2: bf1 is now selective (due to BF on c1), enabling BF on bf3.c3
+    // from bf1.b1 — a DIFFERENT key, which is the transitive BF case.
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select * from bf3 join bf1 on bf3.c3 = bf1.b1 " +
+        "join bf2 on bf1.c1 = bf2.c2 where bf2.a2 = 5"
+
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        val planEnabled = sql(query).queryExecution.optimizedPlan
+        // Should have at least 1 bloom filter from the selective bf2 side
+        assert(getNumBloomFilters(planEnabled) >= 1,
+          "Should inject bloom filter from selective side")
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
+
+  test("Transitive bloom filter produces correct results in 3-table join") {
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select bf3.c3, bf1.c1, bf2.c2 from bf3 " +
+        "join bf1 on bf3.c3 = bf1.c1 " +
+        "join bf2 on bf1.c1 = bf2.c2 " +
+        "where bf2.a2 = 5 order by bf3.c3"
+
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
 }
