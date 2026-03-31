@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.sql.catalyst.expressions.{Alias, BloomFilterMightContain, Literal}
+import org.apache.spark.sql.catalyst.expressions.{Alias, BloomFilterMightContain, Literal, XxHash64}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, BloomFilterAggregate}
 import org.apache.spark.sql.catalyst.optimizer.MergeSubplans
 import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, LogicalPlan}
@@ -578,6 +578,90 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
       assert(subqueryIds.size == 1, "Missing or unexpected SubqueryExec in the plan")
       assert(reusedSubqueryIds.size == 0,
         "Missing or unexpected reused ReusedSubqueryExec in the plan")
+    }
+  }
+
+  private def getBloomFilterKeyLengths(plan: LogicalPlan): Seq[Int] = {
+    plan.collect {
+      case Filter(condition, _) =>
+        condition.collect {
+          case BloomFilterMightContain(_, XxHash64(keys, _)) => keys.length
+        }
+    }.flatten
+  }
+
+  test("Composite bloom filter for multi-key equi-join") {
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select * from bf1 join bf2 on bf1.c1 = bf2.c2 and " +
+        "bf1.b1 = bf2.b2 where bf2.a2 = 62"
+
+      var planEnabled: LogicalPlan = null
+      var expectedAnswer: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expectedAnswer = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        planEnabled = sql(query).queryExecution.optimizedPlan
+        checkAnswer(sql(query), expectedAnswer)
+      }
+      // Multi-key join should produce ONE composite bloom filter, not two separate ones
+      assert(getNumBloomFilters(planEnabled) == 1,
+        "Multi-key join should produce ONE composite bloom filter")
+      // The composite bloom filter should hash 2 keys together
+      val keyLengths = getBloomFilterKeyLengths(planEnabled)
+      assert(keyLengths.exists(_ == 2),
+        "Composite bloom filter should hash 2 keys together")
+    }
+  }
+
+  test("Single-key join uses single-key bloom filter") {
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select * from bf1 join bf2 on bf1.c1 = bf2.c2 where bf2.a2 = 62"
+
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        val plan = sql(query).queryExecution.optimizedPlan
+        assert(getNumBloomFilters(plan) == 1)
+        val keyLengths = getBloomFilterKeyLengths(plan)
+        assert(keyLengths.exists(_ == 1),
+          "Single-key join should use single-key bloom filter")
+      }
+    }
+  }
+
+  test("Composite bloom filter produces correct results") {
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select bf1.c1, bf1.b1 from bf1 join bf2 " +
+        "on bf1.c1 = bf2.c2 and bf1.b1 = bf2.b2 " +
+        "where bf2.a2 = 62 order by bf1.c1, bf1.b1"
+
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
+
+  test("Composite bloom filter with DPP on a different column") {
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000",
+      SQLConf.DYNAMIC_PARTITION_PRUNING_ENABLED.key -> "true") {
+      // bf5part is partitioned by f5; joining on c5 and b5 (non-partition columns)
+      // should still allow composite bloom filter injection
+      val query = "select * from bf5part join bf2 on " +
+        "bf5part.c5 = bf2.c2 and bf5part.b5 = bf2.b2 where bf2.a2 = 62"
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
     }
   }
 }
