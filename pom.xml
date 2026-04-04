@@ -125,7 +125,7 @@
     <sbt.project.name>spark</sbt.project.name>
     <asm.version>9.9.1</asm.version>
     <slf4j.version>2.0.17</slf4j.version>
-    <log4j.version>2.25.3</log4j.version>
+    <log4j.version>2.25.4</log4j.version>
     <!-- make sure to update IsolatedClientLoader whenever this version is changed -->
     <hadoop.version>3.4.3</hadoop.version>
     <!-- SPARK-41247: When updating `protobuf.version`, also need to update `protoVersion` in `SparkBuild.scala` -->
@@ -3501,6 +3501,19 @@
       <properties>
         <test.java.home>${env.JAVA_HOME}</test.java.home>
       </properties>
+    </profile>
+
+    <profile>
+      <id>maven-mirror</id>
+      <activation>
+        <property><name>env.MAVEN_MIRROR_URL</name></property>
+      </activation>
+      <repositories>
+        <repository>
+          <id>maven-mirror</id>
+          <url>${env.MAVEN_MIRROR_URL}</url>
+        </repository>
+      </repositories>
     </profile>
 
     <!--
