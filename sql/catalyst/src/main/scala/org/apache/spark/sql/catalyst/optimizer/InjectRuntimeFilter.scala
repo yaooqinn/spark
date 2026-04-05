@@ -122,11 +122,20 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         extract(child, predicateReference, hasHitFilter, hasHitSelectiveFilter, currentPlan,
           targetKey)
       case Filter(condition, child) if isSimpleExpression(condition) =>
+        // Treat BloomFilterMightContain as a selective signal for transitive propagation,
+        // but ONLY when the BF filters on DIFFERENT keys than the current target key.
+        // This prevents circular BFs (A→B triggering reverse B→A on the same join).
+        val hasTransitiveBF = condition.exists {
+          case BloomFilterMightContain(_, XxHash64(hashKeys, _)) =>
+            !hashKeys.exists(_.semanticEquals(targetKey))
+          case _ => false
+        }
+        val isSelective = isLikelySelective(condition) || hasTransitiveBF
         extract(
           child,
           predicateReference ++ condition.references,
           hasHitFilter = true,
-          hasHitSelectiveFilter = hasHitSelectiveFilter || isLikelySelective(condition),
+          hasHitSelectiveFilter = hasHitSelectiveFilter || isSelective,
           currentPlan,
           targetKey)
       case ExtractEquiJoinKeys(joinType, lkeys, rkeys, _, _, left, right, _) =>
@@ -252,7 +261,15 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
     if (findExpressionAndTrackLineageDown(
       filterApplicationSideKey, filterApplicationSide).isDefined &&
       satisfyByteSizeRequirement(filterApplicationSide)) {
-      extractSelectiveFilterOverScan(filterCreationSide, filterCreationSideKey)
+      extractSelectiveFilterOverScan(
+        filterCreationSide, filterCreationSideKey).filter {
+        case (_, creationPlan) =>
+          // Only inject BF when creation side is significantly smaller than application side.
+          val creationSize = creationPlan.stats.sizeInBytes
+          val applicationSize = filterApplicationSide.stats.sizeInBytes
+          applicationSize < conf.runtimeFilterCreationSideThreshold ||
+            creationSize < applicationSize / 3
+      }
     } else {
       None
     }
@@ -303,8 +320,7 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
         if (filterCounter < numFilterThreshold && eligibleKeyPairs.nonEmpty) {
           val hasShuffle = isProbablyShuffleJoin(left, right, hint)
           if (eligibleKeyPairs.length > 1) {
-            // Multi-key join: inject ONE composite bloom filter using all keys together
-            // for higher selectivity (e.g., hash(ticket_number, item_sk) vs hash(item_sk))
+            // Multi-key join: try ONE composite bloom filter using all keys together
             val (eligibleLeftKeys, eligibleRightKeys) = eligibleKeyPairs.unzip
             val oldLeft = newLeft
             val oldRight = newRight
@@ -339,6 +355,35 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
             }
             if (!newLeft.fastEquals(oldLeft) || !newRight.fastEquals(oldRight)) {
               filterCounter = filterCounter + 1
+            }
+            // Fall back to per-key BFs if composite injection didn't happen
+            if (newLeft.fastEquals(oldLeft) && newRight.fastEquals(oldRight)) {
+              eligibleKeyPairs.foreach { case (l, r) =>
+                if (filterCounter < numFilterThreshold) {
+                  val oldL = newLeft
+                  val oldR = newRight
+                  if (canPruneLeft(joinType) && (hasShuffle || probablyHasShuffle(left)) &&
+                    !hasBloomFilter(newLeft, Seq(l))) {
+                    extractBeneficialFilterCreatePlan(left, right, l, r).foreach {
+                      case (filterCreationSideKey, filterCreationSidePlan) =>
+                        newLeft = injectFilter(
+                          Seq(l), newLeft, Seq(filterCreationSideKey), filterCreationSidePlan)
+                    }
+                  }
+                  if (newLeft.fastEquals(oldL) && canPruneRight(joinType) &&
+                    (hasShuffle || probablyHasShuffle(right)) &&
+                    !hasBloomFilter(newRight, Seq(r))) {
+                    extractBeneficialFilterCreatePlan(right, left, r, l).foreach {
+                      case (filterCreationSideKey, filterCreationSidePlan) =>
+                        newRight = injectFilter(
+                          Seq(r), newRight, Seq(filterCreationSideKey), filterCreationSidePlan)
+                    }
+                  }
+                  if (!newLeft.fastEquals(oldL) || !newRight.fastEquals(oldR)) {
+                    filterCounter = filterCounter + 1
+                  }
+                }
+              }
             }
           } else {
             // Single-key join: use original per-key logic for backward compatibility

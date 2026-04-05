@@ -791,4 +791,56 @@ class InjectRuntimeFilterSuite extends QueryTest with SharedSparkSession
       }
     }
   }
+
+  test("Transitive bloom filter propagation across join chain") {
+    // bf3 JOIN bf1 ON bf3.c3 = bf1.b1 JOIN bf2 ON bf1.c1 = bf2.c2 WHERE bf2.a2 = 5
+    // Pass 1: bf2 has selective filter (a2=5) → BF injected on bf1.c1
+    // Transitive: bf1 now has BF (on c1) → treated as selective →
+    //   enables BF on bf3.c3 from bf1.b1 (different key, so not circular)
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select * from bf3 join bf1 on bf3.c3 = bf1.b1 " +
+        "join bf2 on bf1.c1 = bf2.c2 where bf2.a2 = 5"
+
+      var planDisabled: LogicalPlan = null
+      var planEnabled: LogicalPlan = null
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        planDisabled = sql(query).queryExecution.optimizedPlan
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        planEnabled = sql(query).queryExecution.optimizedPlan
+        checkAnswer(sql(query), expected)
+      }
+      // Verify BFs are actually injected (not just correctness)
+      val bfCount = getNumBloomFilters(planEnabled)
+      assert(bfCount > getNumBloomFilters(planDisabled),
+        s"Should inject more BFs with transitive propagation, " +
+          s"got $bfCount (enabled) vs ${getNumBloomFilters(planDisabled)} (disabled)")
+      // Verify BF is present in the plan text
+      val planStr = planEnabled.toString
+      assert(planStr.contains("might_contain"),
+        "Plan should contain bloom filter (might_contain) node")
+    }
+  }
+
+  test("Transitive bloom filter produces correct results in 3-table join") {
+    // Same query pattern as above but with ORDER BY — verify correctness
+    withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "3000",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2000") {
+      val query = "select bf3.c3, bf1.b1, bf2.c2 from bf3 " +
+        "join bf1 on bf3.c3 = bf1.b1 " +
+        "join bf2 on bf1.c1 = bf2.c2 " +
+        "where bf2.a2 = 5 order by bf3.c3"
+
+      var expected: Array[Row] = null
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+        expected = sql(query).collect()
+      }
+      withSQLConf(SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
 }
