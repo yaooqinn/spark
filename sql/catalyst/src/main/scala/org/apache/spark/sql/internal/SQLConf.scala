@@ -5727,6 +5727,15 @@ object SQLConf {
       .intConf
       .createWithDefault(100)
 
+  val CTE_MATERIALIZATION_ENABLED =
+    buildConf("spark.sql.optimizer.cte.materialization.enabled")
+      .doc("When true, multi-referenced CTEs containing expensive operations (joins or " +
+        "aggregates) will not be inlined, allowing them to be materialized and reused " +
+        "via shuffle exchange. This avoids redundant computation of expensive CTEs.")
+      .version("4.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
     .doc("If true, always inline the CTE relations for the queries in commands. This is the " +
@@ -8368,6 +8377,8 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
     getConf(SQLConf.MERGE_INTO_NESTED_TYPE_COERCION_ENABLED)
 
   def isTimeTypeEnabled: Boolean = getConf(SQLConf.TIME_TYPE_ENABLED)
+
+  def cteMaterializationEnabled: Boolean = getConf(CTE_MATERIALIZATION_ENABLED)
 
   def listaggAllowDistinctCastWithOrder: Boolean = getConf(LISTAGG_ALLOW_DISTINCT_CAST_WITH_ORDER)
 

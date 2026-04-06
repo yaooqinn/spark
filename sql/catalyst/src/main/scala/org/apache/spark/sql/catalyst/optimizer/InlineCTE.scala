@@ -22,7 +22,7 @@ import scala.collection.mutable
 import org.apache.spark.sql.catalyst.analysis.DeduplicateRelations
 import org.apache.spark.sql.catalyst.expressions.{Alias, OuterReference, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.Inner
-import org.apache.spark.sql.catalyst.plans.logical.{CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, UnionLoop, WithCTE}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, UnionLoop, WithCTE}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.{CTE, PLAN_EXPRESSION}
 
@@ -61,8 +61,26 @@ case class InlineCTE(
     // 1) It is fine to inline a CTE if it references another CTE that is non-deterministic;
     // 2) Any `CTERelationRef` that contains `OuterReference` would have been inlined first.
     refCount == 1 ||
-      cteDef.deterministic ||
-      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference]))
+      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference])) || {
+      // When CTE materialization is enabled, don't inline expensive CTEs
+      // referenced multiple times. An expensive CTE is one that contains
+      // joins or aggregates - materializing avoids redundant computation.
+      val materialize = conf.cteMaterializationEnabled && refCount >= 2 && isExpensiveCTE(cteDef)
+      cteDef.deterministic && !materialize
+    }
+  }
+
+  /**
+   * Returns true if the CTE contains expensive operations that would benefit
+   * from materialization rather than re-computation. Currently checks for
+   * joins and aggregates.
+   */
+  private def isExpensiveCTE(cteDef: CTERelationDef): Boolean = {
+    cteDef.child.exists {
+      case _: Join => true
+      case _: Aggregate => true
+      case _ => false
+    }
   }
 
   /**

@@ -847,6 +847,156 @@ abstract class CTEInlineSuiteBase
       case _ => false
     })
   }
+
+  test("SPARK-XXXXX: CTE materialization produces correct results") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3), (3, 4)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH expensive AS (
+          SELECT c1, sum(c2) as total
+          FROM t GROUP BY c1
+        )
+        SELECT e1.c1, e1.total + e2.total as combined
+        FROM expensive e1 JOIN expensive e2 ON e1.c1 = e2.c1
+        ORDER BY e1.c1
+      """
+      val expected = withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: expensive multi-ref CTE is not inlined when materialization enabled") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH expensive AS (
+            SELECT c1, sum(c2) as total
+            FROM t GROUP BY c1
+          )
+          SELECT e1.c1, e2.total
+          FROM expensive e1 JOIN expensive e2 ON e1.c1 = e2.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val repartitions = plan.collect {
+          case r @ RepartitionByExpression(p, _, None, _) if p.isEmpty => r
+        }
+        assert(repartitions.nonEmpty,
+          "Expensive multi-ref CTE should be materialized (repartition for shuffle reuse)")
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: cheap CTE without joins/aggs is still inlined") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH cheap AS (
+            SELECT c1, c2 FROM t WHERE c1 > 0
+          )
+          SELECT c1.c1, c2.c2
+          FROM cheap c1 JOIN cheap c2 ON c1.c1 = c2.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val repartitions = plan.collect {
+          case r @ RepartitionByExpression(p, _, None, _) if p.isEmpty => r
+        }
+        assert(repartitions.isEmpty,
+          "Cheap CTE (no join/aggregate) should still be inlined")
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: single-ref expensive CTE is still inlined") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH expensive AS (
+            SELECT c1, sum(c2) as total
+            FROM t GROUP BY c1
+          )
+          SELECT c1, total FROM expensive WHERE total > 1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val repartitions = plan.collect {
+          case r @ RepartitionByExpression(p, _, None, _) if p.isEmpty => r
+        }
+        assert(repartitions.isEmpty,
+          "Single-ref CTE should always be inlined")
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: CTE materialization disabled by default") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3)).toDF("c1", "c2").createOrReplaceTempView("t")
+      // Default config (false) - expensive CTE should be inlined (old behavior)
+      val df = sql("""
+        WITH expensive AS (
+          SELECT c1, sum(c2) as total
+          FROM t GROUP BY c1
+        )
+        SELECT e1.c1, e2.total
+        FROM expensive e1 JOIN expensive e2 ON e1.c1 = e2.c1
+      """)
+      val plan = df.queryExecution.optimizedPlan
+      val repartitions = plan.collect {
+        case r @ RepartitionByExpression(p, _, None, _) if p.isEmpty => r
+      }
+      assert(repartitions.isEmpty,
+        "CTE materialization is disabled by default - CTE should be inlined")
+    }
+  }
+
+  test("SPARK-XXXXX: non-deterministic CTE behavior unchanged with materialization") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH nondeterministic AS (
+            SELECT c1, rand() as r FROM t
+          )
+          SELECT n1.c1 FROM nondeterministic n1 JOIN nondeterministic n2 ON n1.c1 = n2.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        // Non-deterministic CTEs are already NOT inlined - repartition for shuffle reuse
+        val repartitions = plan.collect {
+          case r @ RepartitionByExpression(p, _, None, _) if p.isEmpty => r
+        }
+        assert(repartitions.nonEmpty,
+          "Non-deterministic CTE should still be materialized")
+      }
+    }
+  }
+
+  test("SPARK-XXXXX: complex CTE materialization correctness") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2), (2, 3), (3, 4)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH sales_summary AS (
+          SELECT a.c1 as k, count(*) as cnt, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          GROUP BY a.c1
+        )
+        SELECT s1.k, s1.cnt, s2.total
+        FROM sales_summary s1, sales_summary s2
+        WHERE s1.k = s2.k AND s1.cnt > 0
+        ORDER BY s1.k
+      """
+      val expected = withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(SQLConf.CTE_MATERIALIZATION_ENABLED.key -> "true") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
 }
 
 class CTEInlineSuiteAEOff extends CTEInlineSuiteBase with DisableAdaptiveExecutionSuite
