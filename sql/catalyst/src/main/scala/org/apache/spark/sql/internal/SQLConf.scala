@@ -5727,6 +5727,17 @@ object SQLConf {
       .intConf
       .createWithDefault(100)
 
+  val CTE_CACHE_ENABLED =
+    buildConf("spark.sql.optimizer.cte.cache.enabled")
+      .doc("When true, deterministic CTEs containing expensive operations (joins, aggregates, " +
+        "or window functions) that are referenced more than once will be cached in memory " +
+        "via InMemoryRelation instead of being inlined. This avoids redundant computation. " +
+        "The cache storage level follows spark.sql.defaultCacheStorageLevel.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .booleanConf
+      .createWithDefault(false)
+
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
     .doc("If true, always inline the CTE relations for the queries in commands. This is the " +

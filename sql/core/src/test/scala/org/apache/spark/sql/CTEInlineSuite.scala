@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, And, GreaterThan, LessT
 import org.apache.spark.sql.catalyst.optimizer.InlineCTE
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.adaptive._
+import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
@@ -846,6 +847,199 @@ abstract class CTEInlineSuiteBase
       case _: WithCTE => true
       case _ => false
     })
+  }
+
+  test("cte.cache.enabled: expensive multi-ref CTE is materialized") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasInMemoryRelation = plan.collect { case _: InMemoryRelation => true }.nonEmpty
+        assert(hasInMemoryRelation,
+          s"Expensive multi-ref CTE should be materialized with InMemoryRelation," +
+            s" plan:\n${plan.treeString}")
+        // Verify correctness
+        withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+          checkAnswer(df, sql("""
+            WITH cte AS (
+              SELECT a.c1, sum(a.c2) as total
+              FROM t a JOIN t b ON a.c1 = b.c1
+              JOIN t c ON a.c1 = c.c1
+              GROUP BY a.c1
+            )
+            SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+          """))
+        }
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: cheap CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, c2 FROM t WHERE c1 > 1)
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Cheap CTE should still be inlined (no repartition)")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: single-ref expensive CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte WHERE total > 10
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Single-ref CTE should always be inlined")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: disabled by default") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Default config should inline (old behavior)")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: UNION CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT c1, c2 FROM t WHERE c1 > 1
+            UNION ALL
+            SELECT c1, c2 FROM t WHERE c1 < 3
+          )
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "UNION CTE should still be inlined")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: correctness with complex CTE") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH cte AS (
+          SELECT a.c1 as k, count(*) as cnt, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          JOIN t c ON a.c1 = c.c1
+          GROUP BY a.c1
+        )
+        SELECT x.k, x.cnt, y.total
+        FROM cte x, cte y
+        WHERE x.k = y.k AND x.cnt > 0
+        ORDER BY x.k
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: non-deterministic CTE uses repartition (not cache)") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, rand() as r FROM t)
+          SELECT x.c1, y.r FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        // Non-deterministic CTE should NOT use InMemoryRelation
+        val hasInMemory = plan.collect {
+          case _: InMemoryRelation => true
+        }.nonEmpty
+        assert(!hasInMemory,
+          "Non-deterministic CTE should use repartition, not InMemoryRelation cache")
+        // Should have repartition instead
+        assert(plan.treeString.contains("Repartition"),
+          "Non-deterministic CTE should use RepartitionByExpression")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: cache reuse across queries") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        // First query caches the CTE (multi-ref to avoid inlining)
+        val q = """
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """
+        sql(q).collect()
+
+        // Check cache exists
+        assert(!spark.sharedState.cacheManager.isEmpty,
+          "CTE should be cached after first query")
+
+        // Second identical query should reuse cache
+        sql(q).collect()
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
   }
 }
 

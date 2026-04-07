@@ -22,9 +22,10 @@ import scala.collection.mutable
 import org.apache.spark.sql.catalyst.analysis.DeduplicateRelations
 import org.apache.spark.sql.catalyst.expressions.{Alias, OuterReference, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.Inner
-import org.apache.spark.sql.catalyst.plans.logical.{CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, UnionLoop, WithCTE}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, Union, UnionLoop, Window, WithCTE}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.{CTE, PLAN_EXPRESSION}
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * Inlines CTE definitions into corresponding references if either of the conditions satisfies:
@@ -61,8 +62,38 @@ case class InlineCTE(
     // 1) It is fine to inline a CTE if it references another CTE that is non-deterministic;
     // 2) Any `CTERelationRef` that contains `OuterReference` would have been inlined first.
     refCount == 1 ||
-      cteDef.deterministic ||
-      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference]))
+      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference])) ||
+      (cteDef.deterministic && !isCostlyToRepeat(cteDef, refCount))
+  }
+
+  /**
+   * Determines whether a CTE is costly to repeat and would benefit from materialization.
+   * Uses a simple structural heuristic (inspired by Presto's CTE materialization):
+   * - The CTE must be referenced more than once
+   * - The CTE must contain expensive operations (Join, Aggregate, or Window)
+   * - CTEs with UNION/UNION ALL are excluded because references typically
+   *   apply different filter predicates per branch
+   *
+   * This heuristic does NOT depend on statistics, making it reliable even
+   * without ANALYZE TABLE. The cost of in-memory caching is low enough
+   * that materializing at refCount >= 2 is beneficial when the CTE
+   * contains any expensive operation.
+   *
+   * Controlled by `spark.sql.optimizer.cte.cache.enabled`.
+   */
+  private def isCostlyToRepeat(cteDef: CTERelationDef, refCount: Int): Boolean = {
+    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) || refCount <= 1) {
+      return false
+    }
+    if (cteDef.child.exists(_.isInstanceOf[Union])) {
+      return false
+    }
+    cteDef.child.exists {
+      case _: Join => true
+      case _: Aggregate => true
+      case _: Window => true
+      case _ => false
+    }
   }
 
   /**
