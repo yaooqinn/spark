@@ -5727,6 +5727,15 @@ object SQLConf {
       .intConf
       .createWithDefault(100)
 
+  val INLINE_CTE_AVOID_COSTLY_REPEAT =
+    buildConf("spark.sql.optimizer.cte.avoidCostlyRepeat")
+      .doc("When true, deterministic CTEs containing shuffle joins and aggregates that are " +
+        "referenced more than once will not be inlined, allowing them to be materialized " +
+        "and reused via shuffle exchange. This avoids redundant computation for complex CTEs.")
+      .version("4.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
     .doc("If true, always inline the CTE relations for the queries in commands. This is the " +

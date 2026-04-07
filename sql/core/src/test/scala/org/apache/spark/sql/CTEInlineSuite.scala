@@ -847,6 +847,145 @@ abstract class CTEInlineSuiteBase
       case _ => false
     })
   }
+
+  test("avoidCostlyRepeat: expensive multi-ref CTE is materialized") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(hasRepartition,
+          "Expensive multi-ref CTE should be materialized with repartition")
+        // Verify correctness
+        withSQLConf(SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "false") {
+          checkAnswer(df, sql("""
+            WITH cte AS (
+              SELECT a.c1, sum(a.c2) as total
+              FROM t a JOIN t b ON a.c1 = b.c1
+              JOIN t c ON a.c1 = c.c1
+              GROUP BY a.c1
+            )
+            SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+          """))
+        }
+      }
+    }
+  }
+
+  test("avoidCostlyRepeat: cheap CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "true") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, c2 FROM t WHERE c1 > 1)
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Cheap CTE should still be inlined (no repartition)")
+      }
+    }
+  }
+
+  test("avoidCostlyRepeat: single-ref expensive CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte WHERE total > 10
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Single-ref CTE should always be inlined")
+      }
+    }
+  }
+
+  test("avoidCostlyRepeat: disabled by default") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Default config should inline (old behavior)")
+      }
+    }
+  }
+
+  test("avoidCostlyRepeat: UNION CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT c1, c2 FROM t WHERE c1 > 1
+            UNION ALL
+            SELECT c1, c2 FROM t WHERE c1 < 3
+          )
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "UNION CTE should still be inlined")
+      }
+    }
+  }
+
+  test("avoidCostlyRepeat: correctness with complex CTE") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH cte AS (
+          SELECT a.c1 as k, count(*) as cnt, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          JOIN t c ON a.c1 = c.c1
+          GROUP BY a.c1
+        )
+        SELECT x.k, x.cnt, y.total
+        FROM cte x, cte y
+        WHERE x.k = y.k AND x.cnt > 0
+        ORDER BY x.k
+      """
+      val expected = withSQLConf(SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.INLINE_CTE_AVOID_COSTLY_REPEAT.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+      }
+    }
+  }
 }
 
 class CTEInlineSuiteAEOff extends CTEInlineSuiteBase with DisableAdaptiveExecutionSuite
