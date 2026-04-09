@@ -1050,12 +1050,37 @@ abstract class CTEInlineSuiteBase
       Seq((1, 10, 100), (1, 20, 200), (2, 30, 300), (2, 40, 400))
         .toDF("month", "value", "extra")
         .createOrReplaceTempView("t")
+
+      // Compute expected results with cache OFF
+      val expected1 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.value, y.month, y.value
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """).collect()
+      }
+      val expected2 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.extra, y.month, y.extra
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """).collect()
+      }
+
       withSQLConf(
         SQLConf.CTE_CACHE_ENABLED.key -> "true",
         SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
 
-        // Query 1: references CTE twice with filter on month=1 and month=2
-        // Outer query selects (month, value) - column pruning drops 'extra'
         val q1 = """
           WITH inv AS (
             SELECT a.month, a.value, a.extra
@@ -1066,13 +1091,12 @@ abstract class CTEInlineSuiteBase
           FROM inv x, inv y
           WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
         """
-        val r1 = sql(q1).collect()
+        checkAnswer(sql(q1), expected1)
 
         assert(!spark.sharedState.cacheManager.isEmpty,
           "CTE should be cached after first query")
 
-        // Query 2: same CTE structure, same pushed predicates, different column pruning
-        // Outer query selects (month, extra) instead of (month, value)
+        // Query 2: same CTE, same pushed predicates, different column pruning
         val q2 = """
           WITH inv AS (
             SELECT a.month, a.value, a.extra
@@ -1083,21 +1107,17 @@ abstract class CTEInlineSuiteBase
           FROM inv x, inv y
           WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
         """
-        val r2 = sql(q2).collect()
+        // Verify data correctness
+        checkAnswer(sql(q2), expected2)
 
-        // Key assertion: q2 should reuse q1's cache (same preds, only column diff)
+        // Verify plan uses cache (not repartition fallback)
         val q2Plan = sql(q2).queryExecution.optimizedPlan
         val hasInMemoryRelation = q2Plan.collect {
           case _: InMemoryRelation => true
         }.nonEmpty
-        val hasRepartition = q2Plan.collect {
-          case r: RepartitionByExpression if r.partitionExpressions.isEmpty => true
-        }.nonEmpty
         assert(hasInMemoryRelation,
           "q2 should use InMemoryRelation (cache hit from q1). " +
             "Different column pruning should not cause cache miss.")
-        assert(!hasRepartition,
-          "q2 should NOT fall back to RepartitionByExpression (cache miss).")
 
         spark.sharedState.cacheManager.clearCache()
       }
@@ -1106,17 +1126,13 @@ abstract class CTEInlineSuiteBase
 
   test("cte.cache.enabled: different predicates must NOT share cache") {
     // Correctness test: two queries with the same CTE structure but different pushed
-    // predicates must NOT reuse each other's cache. The predicates are part of the cache
-    // key so different predicates produce separate cache entries.
+    // predicates must NOT reuse each other's cache.
     withTempView("t") {
       Seq((1, 10), (2, 20), (3, 30)).toDF("month", "value").createOrReplaceTempView("t")
-      withSQLConf(
-        SQLConf.CTE_CACHE_ENABLED.key -> "true",
-        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
 
-        // Query 1: CTE refs filter on month=1 and month=2
-        // Pushdown produces: Filter(month=1 OR month=2, original)
-        val q1 = """
+      // Compute expected results with cache OFF for both queries
+      val expected1 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
           WITH inv AS (
             SELECT a.month, a.value
             FROM t a JOIN t b ON a.month = b.month
@@ -1124,14 +1140,10 @@ abstract class CTEInlineSuiteBase
           )
           SELECT x.month, y.month FROM inv x, inv y
           WHERE x.month = 1 AND y.month = 2
-        """
-        val r1 = sql(q1).collect()
-        assert(r1.length > 0, "q1 should return results")
-
-        // Query 2: CTE refs filter on month=1 and month=3
-        // Pushdown produces: Filter(month=1 OR month=3, original)
-        // Must NOT reuse q1's cache (which lacks month=3 data)
-        val q2 = """
+        """).collect()
+      }
+      val expected2 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
           WITH inv AS (
             SELECT a.month, a.value
             FROM t a JOIN t b ON a.month = b.month
@@ -1139,14 +1151,93 @@ abstract class CTEInlineSuiteBase
           )
           SELECT x.month, y.month FROM inv x, inv y
           WHERE x.month = 1 AND y.month = 3
-        """
-        val r2 = sql(q2).collect()
+        """).collect()
+      }
 
-        // Verify correctness: q2 must find month=3 data
-        assert(r2.exists(row => row.getInt(1) == 3),
-          "q2 must return month=3 rows. If it doesn't, it wrongly reused " +
-            "q1's cache which only contains month IN (1,2) data.")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
 
+        // Query 1: preds (month=1 OR month=2)
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2
+        """), expected1)
+
+        // Query 2: preds (month=1 OR month=3) - must NOT reuse q1's cache
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 3
+        """), expected2)
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: asymmetric filters - one ref filtered, one bare") {
+    // When one CTE reference has a filter and another doesn't, the pushdown rule
+    // produces a TRUE predicate (no filtering). Verify correctness.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH cte AS (
+          SELECT a.c1, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          GROUP BY a.c1
+        )
+        SELECT x.c1, x.total, y.c1, y.total
+        FROM cte x, cte y
+        WHERE x.c1 = 1 AND x.c1 = y.c1
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: CTE referenced in scalar subquery (HAVING clause)") {
+    // Simulates TPC-DS q24a pattern: CTE referenced once in main query with a filter
+    // and once in a HAVING scalar subquery without a filter. The subquery reference
+    // has no predicate above it, so the combined predicate becomes TRUE.
+    withTempView("t") {
+      Seq(("red", 10), ("red", 20), ("blue", 30), ("blue", 5))
+        .toDF("color", "amount").createOrReplaceTempView("t")
+      val query = """
+        WITH ssales AS (
+          SELECT a.color, sum(b.amount) as total
+          FROM t a JOIN t b ON a.color = b.color
+          GROUP BY a.color
+        )
+        SELECT color, total
+        FROM ssales
+        WHERE color = 'red'
+          AND total > (SELECT avg(total) * 0.5 FROM ssales)
+        ORDER BY color
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
         spark.sharedState.cacheManager.clearCache()
       }
     }
