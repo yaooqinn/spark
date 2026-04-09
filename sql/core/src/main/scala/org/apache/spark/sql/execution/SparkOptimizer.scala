@@ -51,23 +51,9 @@ class SparkOptimizer(
   override def preCBORules: Seq[Rule[LogicalPlan]] =
     Seq(OptimizeMetadataOnlyDeleteFromTable)
 
-  // Insert the CTE cache batch before "Clean Up Temporary CTE Info" so that
-  // originalPlanWithPredicates is still available for stable cache key computation.
-  // ReplaceCTERefWithRepartition stays at the end as the safety net for non-cached CTEs.
-  private lazy val baseBatchesWithCTECache: Seq[Batch] = super.defaultBatches.flatMap { batch =>
-    if (batch.name == "Clean Up Temporary CTE Info") {
-      Seq(
-        Batch("Replace CTE with Cache", Once,
-          ReplaceCTERefWithInMemoryCache(session)),
-        batch)
-    } else {
-      Seq(batch)
-    }
-  }
-
   override def defaultBatches: Seq[Batch] = flattenBatches(Seq(
     preOptimizationBatches,
-    baseBatchesWithCTECache,
+    super.defaultBatches,
     Batch("Optimize Metadata Only Query", Once, OptimizeMetadataOnlyQuery(catalog)),
     Batch("PartitionPruning", Once,
       PartitionPruning,
@@ -112,7 +98,8 @@ class SparkOptimizer(
       ConstantFolding,
       EliminateLimits),
     Batch("User Provided Optimizers", fixedPoint, experimentalMethods.extraOptimizations: _*),
-    Batch("Replace Remaining CTE", Once,
+    Batch("Replace CTE with Cache", Once,
+      ReplaceCTERefWithInMemoryCache(session),
       ReplaceCTERefWithRepartition)))
 
   override def nonExcludableRules: Seq[String] = super.nonExcludableRules ++
