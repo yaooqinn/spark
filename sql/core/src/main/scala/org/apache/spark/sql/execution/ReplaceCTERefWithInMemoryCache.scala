@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution
 
 import scala.collection.mutable
 
-import org.apache.spark.sql.catalyst.expressions.{Alias, SubqueryExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Or, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.{CTE, PLAN_EXPRESSION}
@@ -32,18 +32,19 @@ import org.apache.spark.sql.internal.SQLConf
  * when `spark.sql.optimizer.cte.cache.enabled` is enabled.
  *
  * For each non-inlined CTE definition, this rule:
- * 1. Caches the CTE's **original plan** (before predicate pushdown and column pruning) via
- *    [[CacheManager]] as an in-memory columnar table. This ensures cross-query cache reuse
- *    even when different queries push different predicates or prune different columns into the
- *    same CTE definition.
- * 2. Replaces all [[CTERelationRef]] nodes with the cached [[InMemoryRelation]], using
- *    name-based column matching (since the original plan may have more columns than a
- *    pruned CTE reference expects).
+ * 1. Reconstructs a cache plan from the original plan and pushed predicates:
+ *    `Filter(pushed_predicates, original_plan)` with ALL columns (no column pruning).
+ *    This preserves predicate pushdown efficiency (scan/join/agg process only filtered data)
+ *    while keeping all columns available for cross-query reuse.
+ * 2. Uses the cache plan (including predicates) as the cache key. Same predicates across
+ *    queries produce cache hits; different predicates produce separate cache entries,
+ *    preventing data correctness issues.
+ * 3. Replaces [[CTERelationRef]] nodes with cached [[InMemoryRelation]], using name-based
+ *    column matching (since the cache has all columns but CTE refs may be column-pruned).
  *
  * Correctness: [[PushdownPredicatesAndPruneColumnsForCTEDef]] pushes predicates INTO the CTE
- * definition as an optimization but does NOT remove the original predicates from above the CTE
- * reference site. So caching the full (unpruned) plan is safe -- outer filters remain as the
- * correctness guarantee.
+ * definition but does NOT remove the original predicates from above the CTE reference site.
+ * So the outer filters remain as the correctness guarantee.
  *
  * This rule runs before [[CleanUpTempCTEInfo]] so that `originalPlanWithPredicates` is still
  * available on [[CTERelationDef]] nodes.
@@ -66,12 +67,27 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
     }
   }
 
-  /**
-   * Info about a cached CTE: the InMemoryRelation (or fallback plan), plus the output
-   * of the plan that was actually cached (the original plan's output, which may have
-   * more columns than a pruned CTE reference expects).
-   */
   private case class CachedCTEInfo(plan: LogicalPlan)
+
+  /**
+   * Build the plan to cache from originalPlanWithPredicates:
+   * - Keep pushed predicates (for scan/join/agg efficiency)
+   * - Remove column pruning (keep all columns for cross-query reuse)
+   *
+   * If predicates were pushed: Filter(pred1 OR pred2, original_plan)
+   * If no predicates: original_plan as-is
+   */
+  private def buildCachePlan(cteDef: CTERelationDef): LogicalPlan = {
+    cteDef.originalPlanWithPredicates match {
+      case Some((originalPlan, preds)) if preds.nonEmpty =>
+        Filter(preds.reduce(Or), originalPlan)
+      case Some((originalPlan, _)) =>
+        originalPlan
+      case None =>
+        // No pushdown happened — use the current child as-is
+        cteDef.child
+    }
+  }
 
   private def replaceWithCache(
       plan: LogicalPlan,
@@ -91,28 +107,21 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
           }
           cteCache.put(cteDef.id, CachedCTEInfo(fallback))
         } else {
-          // Use the ORIGINAL plan (before predicate pushdown and column pruning) as both
-          // the cache key and the cached data. This ensures:
-          // 1. Cross-query cache reuse: different queries pushing different predicates/columns
-          //    into the same CTE will find the same cache entry.
-          // 2. Correctness: outer filters (above CTE refs) are preserved by
-          //    PushdownPredicatesAndPruneColumnsForCTEDef, so they handle row filtering.
-          // 3. Column selection: InMemoryRelation scans select only needed columns.
-          val originalPlan = cteDef.originalPlanWithPredicates match {
-            case Some((origPlan, _)) => origPlan
-            case None => cteDef.child
-          }
-          val cacheKeyPlan = replaceWithCache(originalPlan, cteCache)
+          // Build cache plan: Filter(pushed_preds, original_plan) with ALL columns.
+          // The cache key includes predicates so different predicates produce separate
+          // cache entries (correctness), while column pruning is stripped so different
+          // column needs share the same entry (cross-query reuse).
+          val cachePlan = replaceWithCache(buildCachePlan(cteDef), cteCache)
 
-          // Check if this CTE's original plan is already cached
-          val existing = cacheManager.lookupCachedData(session, cacheKeyPlan)
+          // Check if this plan is already cached
+          val existing = cacheManager.lookupCachedData(session, cachePlan)
           if (existing.isEmpty) {
             val tableName = Some(s"cte_${cteDef.id}")
-            cacheManager.cacheQuery(session, cacheKeyPlan, tableName, storageLevel)
+            cacheManager.cacheQuery(session, cachePlan, tableName, storageLevel)
           }
 
           // Look up the InMemoryRelation for this CTE
-          cacheManager.lookupCachedData(session, cacheKeyPlan) match {
+          cacheManager.lookupCachedData(session, cachePlan) match {
             case Some(cd) =>
               cteCache.put(cteDef.id, CachedCTEInfo(cd.cachedRepresentation))
             case None =>
@@ -139,10 +148,8 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
           if (ref.outputSet == newPlan.outputSet) {
             newPlan
           } else {
-            // Name-based column matching: the cached plan may have more columns than
-            // the pruned CTE reference (due to column pruning by
-            // PushdownPredicatesAndPruneColumnsForCTEDef). We select matching columns
-            // by name to handle this correctly.
+            // Name-based column matching: the cached plan has all columns but the
+            // CTE reference may be column-pruned. Select matching columns by name.
             val cachedOutputByName = newPlan.output.map(a => a.name -> a).toMap
             val projectList = ref.output.map { tgtAttr =>
               cachedOutputByName.get(tgtAttr.name) match {

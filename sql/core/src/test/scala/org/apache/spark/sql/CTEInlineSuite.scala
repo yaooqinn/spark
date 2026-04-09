@@ -1042,11 +1042,10 @@ abstract class CTEInlineSuiteBase
     }
   }
 
-  test("cte.cache.enabled: cache reuse across queries with different predicate pushdown") {
+  test("cte.cache.enabled: cache reuse across queries with same preds, different columns") {
     // Simulates the q39a->q39b pattern: two separate queries referencing the same CTE
-    // structure, but PushdownPredicatesAndPruneColumnsForCTEDef pushes different predicates
-    // and prunes different columns for each query. The cache should still hit because we
-    // cache the ORIGINAL plan (before pushdown).
+    // structure with SAME pushed predicates but different column pruning. The cache should
+    // hit because we cache Filter(preds, original_plan) with ALL columns.
     withTempView("t") {
       Seq((1, 10, 100), (1, 20, 200), (2, 30, 300), (2, 40, 400))
         .toDF("month", "value", "extra")
@@ -1072,8 +1071,8 @@ abstract class CTEInlineSuiteBase
         assert(!spark.sharedState.cacheManager.isEmpty,
           "CTE should be cached after first query")
 
-        // Query 2: same CTE structure but different outer columns/predicates
-        // Outer query selects (month, extra) - different column pruning than q1
+        // Query 2: same CTE structure, same pushed predicates, different column pruning
+        // Outer query selects (month, extra) instead of (month, value)
         val q2 = """
           WITH inv AS (
             SELECT a.month, a.value, a.extra
@@ -1086,8 +1085,7 @@ abstract class CTEInlineSuiteBase
         """
         val r2 = sql(q2).collect()
 
-        // Key assertion: q2's optimized plan should use InMemoryRelation (cache hit),
-        // not RepartitionByExpression (cache miss)
+        // Key assertion: q2 should reuse q1's cache (same preds, only column diff)
         val q2Plan = sql(q2).queryExecution.optimizedPlan
         val hasInMemoryRelation = q2Plan.collect {
           case _: InMemoryRelation => true
@@ -1097,9 +1095,57 @@ abstract class CTEInlineSuiteBase
         }.nonEmpty
         assert(hasInMemoryRelation,
           "q2 should use InMemoryRelation (cache hit from q1). " +
-            "Different predicate pushdown should not cause cache miss.")
+            "Different column pruning should not cause cache miss.")
         assert(!hasRepartition,
           "q2 should NOT fall back to RepartitionByExpression (cache miss).")
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: different predicates must NOT share cache") {
+    // Correctness test: two queries with the same CTE structure but different pushed
+    // predicates must NOT reuse each other's cache. The predicates are part of the cache
+    // key so different predicates produce separate cache entries.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("month", "value").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+
+        // Query 1: CTE refs filter on month=1 and month=2
+        // Pushdown produces: Filter(month=1 OR month=2, original)
+        val q1 = """
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2
+        """
+        val r1 = sql(q1).collect()
+        assert(r1.length > 0, "q1 should return results")
+
+        // Query 2: CTE refs filter on month=1 and month=3
+        // Pushdown produces: Filter(month=1 OR month=3, original)
+        // Must NOT reuse q1's cache (which lacks month=3 data)
+        val q2 = """
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 3
+        """
+        val r2 = sql(q2).collect()
+
+        // Verify correctness: q2 must find month=3 data
+        assert(r2.exists(row => row.getInt(1) == 3),
+          "q2 must return month=3 rows. If it doesn't, it wrongly reused " +
+            "q1's cache which only contains month IN (1,2) data.")
 
         spark.sharedState.cacheManager.clearCache()
       }
