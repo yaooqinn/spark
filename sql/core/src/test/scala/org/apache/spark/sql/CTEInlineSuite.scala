@@ -1237,7 +1237,15 @@ abstract class CTEInlineSuiteBase
       withSQLConf(
         SQLConf.CTE_CACHE_ENABLED.key -> "true",
         SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
-        checkAnswer(sql(query), expected)
+        val df = sql(query)
+        checkAnswer(df, expected)
+        // The CTE should be INLINED (not cached) because it has a scalar subquery ref
+        val imrs = df.queryExecution.optimizedPlan.collect {
+          case _: InMemoryRelation => true
+        }
+        assert(imrs.isEmpty,
+          "CTE with scalar subquery ref should be inlined, not cached. " +
+            "Caching materializes ALL data without filter pushdown.")
         spark.sharedState.cacheManager.clearCache()
       }
     }

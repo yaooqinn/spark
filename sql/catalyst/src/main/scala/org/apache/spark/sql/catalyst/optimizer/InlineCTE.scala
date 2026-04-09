@@ -56,14 +56,15 @@ case class InlineCTE(
     }
   }
 
-  private def shouldInline(cteDef: CTERelationDef, refCount: Int): Boolean = alwaysInline || {
+  private def shouldInline(
+      cteDef: CTERelationDef, refCount: Int, hasSubqueryRef: Boolean): Boolean = alwaysInline || {
     // We do not need to check enclosed `CTERelationRef`s for `deterministic` or `OuterReference`,
     // because:
     // 1) It is fine to inline a CTE if it references another CTE that is non-deterministic;
     // 2) Any `CTERelationRef` that contains `OuterReference` would have been inlined first.
     refCount == 1 ||
       cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference])) ||
-      (cteDef.deterministic && !isCostlyToRepeat(cteDef, refCount))
+      (cteDef.deterministic && !isCostlyToRepeat(cteDef, refCount, hasSubqueryRef))
   }
 
   /**
@@ -81,11 +82,19 @@ case class InlineCTE(
    *
    * Controlled by `spark.sql.optimizer.cte.cache.enabled`.
    */
-  private def isCostlyToRepeat(cteDef: CTERelationDef, refCount: Int): Boolean = {
+  private def isCostlyToRepeat(
+      cteDef: CTERelationDef, refCount: Int, hasSubqueryRef: Boolean): Boolean = {
     if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) || refCount <= 1) {
       return false
     }
     if (cteDef.child.exists(_.isInstanceOf[Union])) {
+      return false
+    }
+    // When a CTE is referenced inside a scalar subquery (e.g., HAVING clause),
+    // the subquery ref has no outer predicates. PushdownPredicatesAndPruneColumnsForCTEDef
+    // produces TRUE predicate, causing the cached CTE to materialize ALL data.
+    // Inlining is better: each copy gets independent predicate pushdown optimization.
+    if (hasSubqueryRef && refCount > 1) {
       return false
     }
     cteDef.child.exists {
@@ -108,7 +117,8 @@ case class InlineCTE(
   private def buildCTEMap(
       plan: LogicalPlan,
       cteMap: mutable.Map[Long, CTEReferenceInfo],
-      outerCTEId: Option[Long] = None): Unit = {
+      outerCTEId: Option[Long] = None,
+      inSubquery: Boolean = false): Unit = {
     plan match {
       case WithCTE(child, cteDefs) =>
         val isDuplicated = cteDefs.forall(cteDef => cteMap.contains(cteDef.id))
@@ -127,18 +137,20 @@ case class InlineCTE(
               refCount = 0,
               outgoingRefs = mutable.Map.empty.withDefaultValue(0),
               shouldInline = true,
+              hasSubqueryRef = false,
               container = outerCTEId
             )
           }
 
           cteDefs.foreach { cteDef =>
-            buildCTEMap(cteDef, cteMap, Some(cteDef.id))
+            buildCTEMap(cteDef, cteMap, Some(cteDef.id), inSubquery)
           }
-          buildCTEMap(child, cteMap, outerCTEId)
+          buildCTEMap(child, cteMap, outerCTEId, inSubquery)
         }
 
       case ref: CTERelationRef =>
-        cteMap(ref.cteId) = cteMap(ref.cteId).withRefCountIncreased(1)
+        val info = cteMap(ref.cteId).withRefCountIncreased(1)
+        cteMap(ref.cteId) = if (inSubquery) info.copy(hasSubqueryRef = true) else info
 
         // The `outerCTEId` CTE definition can either reference `cteId` definition if `cteId` is in
         // the same or in an outer `WithCTE` node, or `outerCTEId` can contain `cteId` definition if
@@ -153,13 +165,14 @@ case class InlineCTE(
       case _ =>
         if (plan.containsPattern(CTE)) {
           plan.children.foreach { child =>
-            buildCTEMap(child, cteMap, outerCTEId)
+            buildCTEMap(child, cteMap, outerCTEId, inSubquery)
           }
 
           plan.expressions.foreach { expr =>
             if (expr.containsAllPatterns(PLAN_EXPRESSION, CTE)) {
               expr.foreach {
-                case e: SubqueryExpression => buildCTEMap(e.plan, cteMap, outerCTEId)
+                case e: SubqueryExpression =>
+                  buildCTEMap(e.plan, cteMap, outerCTEId, inSubquery = true)
                 case _ =>
               }
             }
@@ -195,7 +208,7 @@ case class InlineCTE(
           val refInfo = cteMap(cteDef.id)
           if (refInfo.refCount > 0) {
             val newDef = refInfo.cteDef.copy(child = inlineCTE(refInfo.cteDef.child, cteMap))
-            val inlineDecision = shouldInline(newDef, refInfo.refCount)
+            val inlineDecision = shouldInline(newDef, refInfo.refCount, refInfo.hasSubqueryRef)
             cteMap(cteDef.id) = cteMap(cteDef.id).copy(
               cteDef = newDef, shouldInline = inlineDecision
             )
@@ -285,6 +298,7 @@ case class InlineCTE(
  *                 from other CTE relations and regular places.
  * @param outgoingRefs A mutable map that tracks outgoing reference counts to other CTE relations.
  * @param shouldInline If true, this CTE relation should be inlined in the places that reference it.
+ * @param hasSubqueryRef If true, at least one reference to this CTE is inside a SubqueryExpression.
  * @param container The container of a CTE definition is another CTE definition in which the
  *                  `WithCTE` node of the definition resides.
  */
@@ -293,6 +307,7 @@ case class CTEReferenceInfo(
     refCount: Int,
     outgoingRefs: mutable.Map[Long, Int],
     shouldInline: Boolean,
+    hasSubqueryRef: Boolean,
     container: Option[Long]) {
 
   def withRefCountIncreased(count: Int): CTEReferenceInfo = {
