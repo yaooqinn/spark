@@ -1041,6 +1041,70 @@ abstract class CTEInlineSuiteBase
       }
     }
   }
+
+  test("cte.cache.enabled: cache reuse across queries with different predicate pushdown") {
+    // Simulates the q39a->q39b pattern: two separate queries referencing the same CTE
+    // structure, but PushdownPredicatesAndPruneColumnsForCTEDef pushes different predicates
+    // and prunes different columns for each query. The cache should still hit because we
+    // cache the ORIGINAL plan (before pushdown).
+    withTempView("t") {
+      Seq((1, 10, 100), (1, 20, 200), (2, 30, 300), (2, 40, 400))
+        .toDF("month", "value", "extra")
+        .createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+
+        // Query 1: references CTE twice with filter on month=1 and month=2
+        // Outer query selects (month, value) - column pruning drops 'extra'
+        val q1 = """
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.value, y.month, y.value
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """
+        val r1 = sql(q1).collect()
+
+        assert(!spark.sharedState.cacheManager.isEmpty,
+          "CTE should be cached after first query")
+
+        // Query 2: same CTE structure but different outer columns/predicates
+        // Outer query selects (month, extra) - different column pruning than q1
+        val q2 = """
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.extra, y.month, y.extra
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """
+        val r2 = sql(q2).collect()
+
+        // Key assertion: q2's optimized plan should use InMemoryRelation (cache hit),
+        // not RepartitionByExpression (cache miss)
+        val q2Plan = sql(q2).queryExecution.optimizedPlan
+        val hasInMemoryRelation = q2Plan.collect {
+          case _: InMemoryRelation => true
+        }.nonEmpty
+        val hasRepartition = q2Plan.collect {
+          case r: RepartitionByExpression if r.partitionExpressions.isEmpty => true
+        }.nonEmpty
+        assert(hasInMemoryRelation,
+          "q2 should use InMemoryRelation (cache hit from q1). " +
+            "Different predicate pushdown should not cause cache miss.")
+        assert(!hasRepartition,
+          "q2 should NOT fall back to RepartitionByExpression (cache miss).")
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
 }
 
 class CTEInlineSuiteAEOff extends CTEInlineSuiteBase with DisableAdaptiveExecutionSuite
