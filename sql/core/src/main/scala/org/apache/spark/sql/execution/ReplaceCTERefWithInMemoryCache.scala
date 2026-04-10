@@ -22,41 +22,33 @@ import scala.collection.mutable
 import org.apache.spark.sql.catalyst.expressions.{Alias, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{CTE, PLAN_EXPRESSION}
+import org.apache.spark.sql.catalyst.trees.TreePattern.CTE
 import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.internal.SQLConf
 
 /**
- * Replaces non-inlined CTE references with [[InMemoryRelation]] (columnar cache)
- * when `spark.sql.optimizer.cte.cache.enabled` is enabled.
+ * Caches non-inlined CTE definitions as [[InMemoryRelation]] columnar tables.
  *
- * For each non-inlined CTE definition, this rule:
- * 1. Caches the CTE plan via [[CacheManager]] as an in-memory columnar table
- * 2. Replaces all [[CTERelationRef]] nodes with the cached [[InMemoryRelation]]
+ * For each [[WithCTE]] node, deterministic CTEs that were kept by [[InlineCTE]]
+ * (via the `isCostlyToRepeat` heuristic) are cached through [[CacheManager]].
+ * Each [[CTERelationRef]] is then replaced with the cached [[InMemoryRelation]].
  *
- * Note: This is a side-effecting optimizer rule -- it mutates the CacheManager during
- * optimization. Ideally, caching would happen in a QueryExecution hook between optimization
- * and physical planning, but that would require modifying QueryExecution.scala which is
- * higher-risk. This trade-off is acceptable for a POC; a future refactor could move the
- * cacheQuery() call to QueryExecution.
+ * CTEs created by [[MergeSubplans]] (with `underSubquery = true`) are skipped
+ * and left for [[ReplaceCTERefWithRepartition]] to handle via the repartition path.
  *
- * When the config is disabled, this rule returns the plan unchanged and lets
- * [[ReplaceCTERefWithRepartition]] (the next rule in the batch) handle CTE replacement.
+ * CTEs that fail to cache also fall through to [[ReplaceCTERefWithRepartition]].
  */
 case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED)) {
-      return plan  // Let ReplaceCTERefWithRepartition handle it
+    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) ||
+        plan.isInstanceOf[Subquery] ||
+        !plan.containsPattern(CTE)) {
+      return plan
     }
-    plan match {
-      case _: Subquery => plan
-      case _ if !plan.containsPattern(CTE) => plan
-      case _ =>
-        val cteCache = mutable.HashMap.empty[Long, LogicalPlan]
-        replaceWithCache(plan, cteCache)
-    }
+    val cteCache = mutable.HashMap.empty[Long, LogicalPlan]
+    replaceWithCache(plan, cteCache)
   }
 
   private def replaceWithCache(
@@ -66,75 +58,65 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
     case WithCTE(child, cteDefs) =>
       val cacheManager = session.sharedState.cacheManager
       val storageLevel = conf.defaultCacheStorageLevel
+      val minRefCount = conf.getConf(SQLConf.CTE_CACHE_MIN_REF_COUNT)
+      // Count references per CTE in the outer plan to apply minRefCount threshold
+      val refCounts = mutable.HashMap.empty[Long, Int].withDefaultValue(0)
+      child.foreach {
+        case ref: CTERelationRef => refCounts(ref.cteId) += 1
+        case _ =>
+      }
+      val uncached = mutable.ArrayBuffer.empty[CTERelationDef]
       cteDefs.foreach { cteDef =>
-        val processedChild = replaceWithCache(cteDef.child, cteCache)
-
-        // Non-deterministic CTEs should use repartition, not cache
-        if (!cteDef.deterministic) {
-          val fallback = if (cteDef.underSubquery) {
-            processedChild
-          } else {
-            RepartitionByExpression(Seq.empty, processedChild, None)
-          }
-          cteCache.put(cteDef.id, fallback)
-        } else {
-          // Check if this CTE's plan is already cached (supports reuse across queries)
+        if (cteDef.deterministic && !cteDef.underSubquery &&
+            refCounts(cteDef.id) >= minRefCount) {
+          val processedChild = replaceWithCache(cteDef.child, cteCache)
           val existing = cacheManager.lookupCachedData(session, processedChild)
           if (existing.isEmpty) {
-            val tableName = Some(s"cte_${cteDef.id}")
             cacheManager.cacheQuery(
-              session, processedChild, tableName,
-              storageLevel)
+              session, processedChild, Some(s"cte_${cteDef.id}"), storageLevel)
           }
-
-          // Look up the InMemoryRelation for this CTE
           cacheManager.lookupCachedData(session, processedChild) match {
             case Some(cd) =>
               cteCache.put(cteDef.id, cd.cachedRepresentation)
             case None =>
-              // Cache lookup failed -- fall back to repartition
-              val fallback = if (cteDef.underSubquery) {
-                processedChild
-              } else {
-                RepartitionByExpression(Seq.empty, processedChild, None)
-              }
-              cteCache.put(cteDef.id, fallback)
+              uncached += cteDef
           }
+        } else {
+          uncached += cteDef
         }
       }
-      replaceWithCache(child, cteCache)
-
-    case ref: CTERelationRef =>
-      cteCache.get(ref.cteId) match {
-        case Some(cachedPlan) =>
-          val newPlan = cachedPlan match {
-            case imr: InMemoryRelation => imr.newInstance()
-            case other => other
-          }
-          if (ref.outputSet == newPlan.outputSet) {
-            newPlan
-          } else {
-            require(ref.output.length == newPlan.output.length,
-              s"CTE ref output length (${ref.output.length}) != " +
-                s"cached plan output length (${newPlan.output.length})")
-            val projectList = ref.output.zip(newPlan.output).map {
-              case (tgtAttr, srcAttr) =>
-                Alias(srcAttr, tgtAttr.name)(exprId = tgtAttr.exprId)
-            }
-            Project(projectList, newPlan)
-          }
-        case None => ref
+      val newChild = replaceWithCache(child, cteCache)
+      if (uncached.isEmpty) {
+        newChild
+      } else {
+        WithCTE(newChild, uncached.toSeq)
       }
 
-    case _ if plan.containsPattern(CTE) =>
-      plan
-        .withNewChildren(plan.children.map(c => replaceWithCache(c, cteCache)))
-        .transformExpressionsWithPruning(
-          _.containsAllPatterns(PLAN_EXPRESSION, CTE)) {
-          case e: SubqueryExpression =>
+    case ref: CTERelationRef =>
+      cteCache.get(ref.cteId).map { cachedPlan =>
+        val newPlan = cachedPlan match {
+          case imr: InMemoryRelation => imr.newInstance()
+          case other => other
+        }
+        if (ref.outputSet == newPlan.outputSet) {
+          newPlan
+        } else {
+          val projectList = ref.output.zip(newPlan.output).map {
+            case (tgtAttr, srcAttr) =>
+              Alias(srcAttr, tgtAttr.name)(exprId = tgtAttr.exprId)
+          }
+          Project(projectList, newPlan)
+        }
+      }.getOrElse(ref)
+
+    case other if other.containsPattern(CTE) =>
+      other
+        .withNewChildren(other.children.map(c => replaceWithCache(c, cteCache)))
+        .transformExpressionsWithPruning(_.containsPattern(CTE)) {
+          case e: SubqueryExpression if e.plan.containsPattern(CTE) =>
             e.withNewPlan(replaceWithCache(e.plan, cteCache))
         }
 
-    case _ => plan
+    case other => other
   }
 }

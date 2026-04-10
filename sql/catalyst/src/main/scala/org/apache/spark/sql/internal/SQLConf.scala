@@ -5742,9 +5742,12 @@ object SQLConf {
 
   val CTE_CACHE_MIN_REF_COUNT =
     buildConf("spark.sql.optimizer.cte.cache.minRefCount")
-      .doc("Minimum number of references a CTE must have to be cached instead of inlined. " +
-        "Higher values reduce cache overhead for CTEs with few references but may miss " +
-        "within-query reuse opportunities. Presto uses 4 as their threshold.")
+      .doc("Minimum number of references for a CTE to use InMemoryRelation " +
+        "cache instead of repartition. CTEs with refCount >= 2 use " +
+        "repartition (exchange reuse via AQE). CTEs with refCount >= " +
+        "this threshold are additionally cached as InMemoryRelation " +
+        "for cross-query reuse. Higher values preserve bloom filter " +
+        "injection and empty relation propagation for more queries.")
       .version("4.2.0")
       .withBindingPolicy(ConfigBindingPolicy.SESSION)
       .intConf

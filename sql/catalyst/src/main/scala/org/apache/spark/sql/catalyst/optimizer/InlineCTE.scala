@@ -82,8 +82,7 @@ case class InlineCTE(
    * Controlled by `spark.sql.optimizer.cte.cache.enabled`.
    */
   private def isCostlyToRepeat(cteDef: CTERelationDef, refCount: Int): Boolean = {
-    val minRefCount = conf.getConf(SQLConf.CTE_CACHE_MIN_REF_COUNT)
-    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) || refCount < minRefCount) {
+    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) || refCount <= 1) {
       return false
     }
     if (cteDef.child.exists(_.isInstanceOf[Union])) {
