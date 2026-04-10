@@ -5729,14 +5729,27 @@ object SQLConf {
 
   val CTE_CACHE_ENABLED =
     buildConf("spark.sql.optimizer.cte.cache.enabled")
-      .doc("When true, deterministic CTEs containing expensive operations (joins, aggregates, " +
-        "or window functions) that are referenced more than once will be cached in memory " +
-        "via InMemoryRelation instead of being inlined. This avoids redundant computation. " +
+      .doc("When true, deterministic CTEs containing expensive operations " +
+        "(joins, aggregates, or window functions) that are referenced at least " +
+        "spark.sql.optimizer.cte.cache.minRefCount times will be cached in " +
+        "memory via InMemoryRelation instead of being inlined. " +
+        "This avoids redundant computation. " +
         "The cache storage level follows spark.sql.defaultCacheStorageLevel.")
       .version("4.2.0")
       .withBindingPolicy(ConfigBindingPolicy.SESSION)
       .booleanConf
       .createWithDefault(false)
+
+  val CTE_CACHE_MIN_REF_COUNT =
+    buildConf("spark.sql.optimizer.cte.cache.minRefCount")
+      .doc("Minimum number of references a CTE must have to be cached instead of inlined. " +
+        "Higher values reduce cache overhead for CTEs with few references but may miss " +
+        "within-query reuse opportunities. Presto uses 4 as their threshold.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .intConf
+      .checkValue(_ >= 2, "Must be >= 2 (single-ref CTEs are always inlined)")
+      .createWithDefault(2)
 
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
