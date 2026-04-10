@@ -24,7 +24,6 @@ import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.CTE
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.collection.Utils
 
 /**
@@ -127,20 +126,16 @@ object PushdownPredicatesAndPruneColumnsForCTEDef extends Rule[LogicalPlan] {
       val (_, _, newPreds, newAttrSet) = cteMap(id)
       val originalPlan = originalPlanWithPredicates.map(_._1).getOrElse(child)
       val preds = originalPlanWithPredicates.map(_._2).getOrElse(Seq.empty)
-      // When CTE cache is enabled, skip column pruning so that the cached plan retains
-      // all columns. This ensures cross-query cache reuse when different queries reference
-      // the same CTE but need different column subsets. Predicate pushdown is preserved.
-      val skipPruning = conf.getConf(SQLConf.CTE_CACHE_ENABLED)
       if (!isTruePredicate(newPreds) &&
           newPreds.exists(newPred => !preds.exists(_.semanticEquals(newPred)))) {
         val newCombinedPred = newPreds.reduce(Or)
-        val newChild = if (!skipPruning && needsPruning(originalPlan, newAttrSet)) {
+        val newChild = if (needsPruning(originalPlan, newAttrSet)) {
           Project(newAttrSet.toSeq, originalPlan)
         } else {
           originalPlan
         }
         CTERelationDef(Filter(newCombinedPred, newChild), id, Some((originalPlan, newPreds)))
-      } else if (!skipPruning && needsPruning(cteDef.child, newAttrSet)) {
+      } else if (needsPruning(cteDef.child, newAttrSet)) {
         CTERelationDef(Project(newAttrSet.toSeq, cteDef.child), id, Some((originalPlan, preds)))
       } else {
         cteDef
@@ -148,8 +143,7 @@ object PushdownPredicatesAndPruneColumnsForCTEDef extends Rule[LogicalPlan] {
 
     case cteRef @ CTERelationRef(cteId, _, output, _, _, _, _, _) =>
       val (cteDef, _, _, newAttrSet) = cteMap(cteId)
-      val skipPruning = conf.getConf(SQLConf.CTE_CACHE_ENABLED)
-      if (!skipPruning && needsPruning(cteDef.child, newAttrSet)) {
+      if (needsPruning(cteDef.child, newAttrSet)) {
         val indices = newAttrSet.toSeq.map(cteDef.output.indexOf)
         val newOutput = indices.map(output)
         cteRef.copy(output = newOutput)

@@ -66,21 +66,11 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
     case WithCTE(child, cteDefs) =>
       val cacheManager = session.sharedState.cacheManager
       val storageLevel = conf.defaultCacheStorageLevel
-
-      // Skip caching for CTEs created by MergeSubplans (underSubquery=true) and
-      // CTEs with refs inside subquery expressions. These patterns indicate the
-      // CTE was merged from scalar subquery reuse  -- caching materializes ALL data
-      // without outer filter pushdown, worse than the default repartition path.
-      val cteIdsWithSubqueryRef = findCTERefsInSubqueries(child, cteDefs.map(_.id).toSet)
-
       cteDefs.foreach { cteDef =>
         val processedChild = replaceWithCache(cteDef.child, cteCache)
 
-        val skipCache = !cteDef.deterministic ||
-          cteDef.underSubquery ||
-          cteIdsWithSubqueryRef.contains(cteDef.id)
-
-        if (skipCache) {
+        // Non-deterministic CTEs should use repartition, not cache
+        if (!cteDef.deterministic) {
           val fallback = if (cteDef.underSubquery) {
             processedChild
           } else {
@@ -146,33 +136,5 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
         }
 
     case _ => plan
-  }
-
-  /**
-   * Find CTE ids that have references inside SubqueryExpression nodes in the plan.
-   * These CTEs should not be cached because the subquery ref has no outer predicates,
-   * causing the pushdown rule to produce TRUE predicate (no filtering).
-   */
-  private def findCTERefsInSubqueries(
-      plan: LogicalPlan, cteIds: Set[Long]): Set[Long] = {
-    val result = mutable.HashSet.empty[Long]
-    def walkExprs(p: LogicalPlan): Unit = {
-      p.expressions.foreach { expr =>
-        if (expr.containsAllPatterns(PLAN_EXPRESSION, CTE)) {
-          expr.foreach {
-            case e: SubqueryExpression =>
-              e.plan.foreach {
-                case ref: CTERelationRef if cteIds.contains(ref.cteId) =>
-                  result += ref.cteId
-                case _ =>
-              }
-            case _ =>
-          }
-        }
-      }
-      p.children.foreach(walkExprs)
-    }
-    walkExprs(plan)
-    result.toSet
   }
 }
