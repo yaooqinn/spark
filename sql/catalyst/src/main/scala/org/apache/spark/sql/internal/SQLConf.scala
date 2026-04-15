@@ -5834,6 +5834,40 @@ object SQLConf {
       .intConf
       .createWithDefault(100)
 
+  val CTE_CACHE_ENABLED =
+    buildConf("spark.sql.optimizer.cte.cache.enabled")
+      .doc("When true, non-inlined CTEs with expensive operations (Join, Aggregate, Window) " +
+        "and subquery references are cached as InMemoryRelation columnar tables. " +
+        "This enables within-query reuse (one computation, multiple reads) " +
+        "and cross-query reuse (sequential queries share cached CTEs).")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .booleanConf
+      .createWithDefault(false)
+
+  val CTE_CACHE_MIN_REF_COUNT =
+    buildConf("spark.sql.optimizer.cte.cache.minRefCount")
+      .doc("Minimum number of references a CTE must have to be cached as InMemoryRelation. " +
+        "Only effective when spark.sql.optimizer.cte.cache.enabled is true.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .intConf
+      .checkValue(_ >= 2, "minRefCount must be at least 2")
+      .createWithDefault(2)
+
+  val CTE_CACHE_REQUIRE_SUBQUERY_REF =
+    buildConf("spark.sql.optimizer.cte.cache.requireSubqueryRef")
+      .doc("When true (default), only cache a CTE if at least one of its references is inside " +
+        "a subquery expression (EXISTS/IN/scalar subquery). Pure self-join patterns are left to " +
+        "AQE exchange reuse. Set to false to also cache self-join-only CTEs; this can help " +
+        "workloads where the CTE body is costly (e.g., multi-join/aggregate) and AQE exchange " +
+        "reuse is insufficient, but may regress plans that benefit from per-branch predicate " +
+        "pushdown. Only effective when spark.sql.optimizer.cte.cache.enabled is true.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .booleanConf
+      .createWithDefault(true)
+
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
     .doc("If true, always inline the CTE relations for the queries in commands. This is the " +

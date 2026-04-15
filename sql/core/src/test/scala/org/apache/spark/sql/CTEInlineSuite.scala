@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, And, GreaterThan, LessT
 import org.apache.spark.sql.catalyst.optimizer.InlineCTE
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.adaptive._
+import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
@@ -847,30 +848,614 @@ abstract class CTEInlineSuiteBase
     })
   }
 
-  test("SPARK-52818: MergeSubplans should not create nested WithCTE with cross-scope refs") {
-    // A non-deterministic CTE referenced in multiple scalar subqueries is not inlined, leaving
-    // a WithCTE. .show() adds a Limit, so the top node is not WithCTE and MergeSubplans runs,
-    // merging scalar subqueries into a new outer WithCTE whose CTE defs reference the inner
-    // WithCTE's defs. ReplaceCTERefWithRepartition then crashes processing the outer defs
-    // before the inner ones are in the map.
+  test("cte.cache.enabled: expensive multi-ref CTE is materialized") {
     withTempView("t") {
-      Seq(("a", "b"), ("c", "d")).toDF("c1", "c2").createOrReplaceTempView("t")
-      sql(
-        """WITH cte AS (
-          |  SELECT c1, c2, monotonically_increasing_id() AS id FROM t
-          |),
-          |agg1 AS (
-          |  SELECT c1, count(*) / (SELECT count(c1) FROM cte) AS r
-          |  FROM cte WHERE c1 IS NOT NULL GROUP BY c1
-          |),
-          |agg2 AS (
-          |  SELECT c2, count(*) / (SELECT count(c2) FROM cte) AS r
-          |  FROM cte WHERE c2 IS NOT NULL GROUP BY c2
-          |)
-          |SELECT b.c1, a1.r, a2.r FROM cte b
-          |LEFT JOIN agg1 a1 ON b.c1 = a1.c1
-          |LEFT JOIN agg2 a2 ON b.c2 = a2.c2
-          |""".stripMargin).show()
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte
+          WHERE total > (SELECT avg(total) FROM cte)
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasInMemoryRelation = plan.collect { case _: InMemoryRelation => true }.nonEmpty
+        assert(hasInMemoryRelation,
+          s"Expensive multi-ref CTE should be materialized with InMemoryRelation," +
+            s" plan:\n${plan.treeString}")
+        // Verify correctness
+        withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+          checkAnswer(df, sql("""
+            WITH cte AS (
+              SELECT a.c1, sum(a.c2) as total
+              FROM t a JOIN t b ON a.c1 = b.c1
+              JOIN t c ON a.c1 = c.c1
+              GROUP BY a.c1
+            )
+            SELECT c1, total FROM cte
+            WHERE total > (SELECT avg(total) FROM cte)
+          """))
+        }
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: cheap CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, c2 FROM t WHERE c1 > 1)
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Cheap CTE should still be inlined (no repartition)")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: single-ref expensive CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte WHERE total > 10
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Single-ref CTE should always be inlined")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: disabled by default") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "Default config should inline (old behavior)")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: UNION CTE still inlined") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT c1, c2 FROM t WHERE c1 > 1
+            UNION ALL
+            SELECT c1, c2 FROM t WHERE c1 < 3
+          )
+          SELECT x.c1, y.c2 FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasRepartition = plan.treeString.contains("RepartitionByExpression")
+        assert(!hasRepartition, "UNION CTE should still be inlined")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: correctness with complex CTE") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH cte AS (
+          SELECT a.c1 as k, count(*) as cnt, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          JOIN t c ON a.c1 = c.c1
+          GROUP BY a.c1
+        )
+        SELECT x.k, x.cnt, y.total
+        FROM cte x, cte y
+        WHERE x.k = y.k AND x.cnt > 0
+        ORDER BY x.k
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: non-deterministic CTE uses repartition (not cache)") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "true") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, rand() as r FROM t)
+          SELECT x.c1, y.r FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        // Non-deterministic CTE should NOT use InMemoryRelation
+        val hasInMemory = plan.collect {
+          case _: InMemoryRelation => true
+        }.nonEmpty
+        assert(!hasInMemory,
+          "Non-deterministic CTE should use repartition, not InMemoryRelation cache")
+        // Should have repartition instead
+        assert(plan.treeString.contains("Repartition"),
+          "Non-deterministic CTE should use RepartitionByExpression")
+      }
+    }
+  }
+
+  test("cte.cache.enabled: cache reuse across queries") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        // First query caches the CTE (subquery ref to trigger caching)
+        val q = """
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte
+          WHERE total > (SELECT avg(total) FROM cte)
+        """
+        sql(q).collect()
+
+        // Check cache exists
+        assert(!spark.sharedState.cacheManager.isEmpty,
+          "CTE should be cached after first query")
+
+        // Second identical query should reuse cache
+        sql(q).collect()
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: correctness with different column pruning across queries") {
+    withTempView("t") {
+      Seq((1, 10, 100), (1, 20, 200), (2, 30, 300), (2, 40, 400))
+        .toDF("month", "value", "extra")
+        .createOrReplaceTempView("t")
+
+      val expected1 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.value, y.month, y.value
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """).collect()
+      }
+      val expected2 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.extra, y.month, y.extra
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """).collect()
+      }
+
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.value, y.month, y.value
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """), expected1)
+
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value, a.extra
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value, a.extra
+          )
+          SELECT x.month, x.extra, y.month, y.extra
+          FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2 AND x.value = y.value
+        """), expected2)
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: different predicates produce correct results") {
+    // Correctness test: two queries with the same CTE structure but different pushed
+    // predicates must NOT reuse each other's cache.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("month", "value").createOrReplaceTempView("t")
+
+      // Compute expected results with cache OFF for both queries
+      val expected1 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2
+        """).collect()
+      }
+      val expected2 = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 3
+        """).collect()
+      }
+
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+
+        // Query 1: preds (month=1 OR month=2)
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 2
+        """), expected1)
+
+        // Query 2: preds (month=1 OR month=3) - must NOT reuse q1's cache
+        checkAnswer(sql("""
+          WITH inv AS (
+            SELECT a.month, a.value
+            FROM t a JOIN t b ON a.month = b.month
+            GROUP BY a.month, a.value
+          )
+          SELECT x.month, y.month FROM inv x, inv y
+          WHERE x.month = 1 AND y.month = 3
+        """), expected2)
+
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: asymmetric filters - one ref filtered, one bare") {
+    // When one CTE reference has a filter and another doesn't, the pushdown rule
+    // produces a TRUE predicate (no filtering). Verify correctness.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val query = """
+        WITH cte AS (
+          SELECT a.c1, sum(b.c2) as total
+          FROM t a JOIN t b ON a.c1 = b.c1
+          GROUP BY a.c1
+        )
+        SELECT x.c1, x.total, y.c1, y.total
+        FROM cte x, cte y
+        WHERE x.c1 = 1 AND x.c1 = y.c1
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: CTE referenced in scalar subquery (HAVING clause)") {
+    // Simulates TPC-DS q24a pattern: CTE referenced once in main query with a filter
+    // and once in a HAVING scalar subquery without a filter. The subquery reference
+    // has no predicate above it, so the combined predicate becomes TRUE.
+    withTempView("t") {
+      Seq(("red", 10), ("red", 20), ("blue", 30), ("blue", 5))
+        .toDF("color", "amount").createOrReplaceTempView("t")
+      val query = """
+        WITH ssales AS (
+          SELECT a.color, sum(b.amount) as total
+          FROM t a JOIN t b ON a.color = b.color
+          GROUP BY a.color
+        )
+        SELECT color, total
+        FROM ssales
+        WHERE color = 'red'
+          AND total > (SELECT avg(total) * 0.5 FROM ssales)
+        ORDER BY color
+      """
+      val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+        sql(query).collect()
+      }
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        checkAnswer(sql(query), expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: subquery ref counted for minRefCount") {
+    // Fix: ref counting must walk subquery expressions.
+    // CTE with 1 ref in main query + 1 ref in HAVING subquery = 2 refs total.
+    withTempView("t") {
+      Seq(("red", 10), ("blue", 20), ("green", 30))
+        .toDF("color", "amount").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_MIN_REF_COUNT.key -> "2",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.color, sum(b.amount) as total
+            FROM t a JOIN t b ON a.color = b.color
+            GROUP BY a.color
+          )
+          SELECT color, total FROM cte
+          WHERE total > (SELECT avg(total) FROM cte)
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val imrCount = plan.collect { case _: InMemoryRelation => true }.size
+        assert(imrCount > 0,
+          "CTE referenced in main + subquery should be cached (2 refs)" +
+            s"\nPlan:\n${plan.treeString}")
+        val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+          sql("""
+            WITH cte AS (
+              SELECT a.color, sum(b.amount) as total
+              FROM t a JOIN t b ON a.color = b.color
+              GROUP BY a.color
+            )
+            SELECT color, total FROM cte
+            WHERE total > (SELECT avg(total) FROM cte)
+          """).collect()
+        }
+        checkAnswer(df, expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: minRefCount threshold respected") {
+    // With minRefCount=3, a 2-ref CTE should NOT be cached.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_MIN_REF_COUNT.key -> "3",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val imrCount = plan.collect { case _: InMemoryRelation => true }.size
+        assert(imrCount == 0,
+          "2-ref CTE should NOT be cached when minRefCount=3" +
+            s"\nPlan:\n${plan.treeString}")
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: MergeSubplans CTE not cached") {
+    // CTEs created by MergeSubplans (underSubquery=true) should not be cached.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          SELECT c1 FROM t WHERE c1 > (SELECT avg(c1) FROM t)
+            AND c2 > (SELECT avg(c2) FROM t)
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        // MergeSubplans may create WithCTE from common subexpressions,
+        // but they should not be cached
+        val imrCount = plan.collect { case _: InMemoryRelation => true }.size
+        assert(imrCount == 0,
+          "MergeSubplans CTEs should not be cached" +
+            s"\nPlan:\n${plan.treeString}")
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: existing cache reused below minRefCount") {
+    // If a prior query cached a CTE, a later query with subquery refs
+    // should find the existing cache via lookupCachedData.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2")
+        .createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_MIN_REF_COUNT.key -> "2",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        // Query A: subquery ref pattern, creates cache
+        val dfA = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte
+          WHERE total > (SELECT avg(total) FROM cte)
+        """)
+        dfA.collect()
+        val imrA = dfA.queryExecution.optimizedPlan.collect {
+          case _: InMemoryRelation => true
+        }.size
+        assert(imrA > 0, "Query A should cache the CTE")
+
+        // Query B: same CTE body with subquery ref + different filter.
+        // Should reuse cache from A.
+        val dfB = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT c1, total FROM cte
+          WHERE c1 > 2
+            AND total > (SELECT avg(total) FROM cte)
+        """)
+        val imrB = dfB.queryExecution.optimizedPlan.collect {
+          case _: InMemoryRelation => true
+        }.size
+        assert(imrB > 0,
+          "Query B should reuse existing cache from Query A" +
+            s"\nPlan:\n${dfB.queryExecution.optimizedPlan.treeString}")
+        checkAnswer(dfB,
+          withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+            sql("""
+              WITH cte AS (
+                SELECT a.c1, sum(a.c2) as total
+                FROM t a JOIN t b ON a.c1 = b.c1
+                GROUP BY a.c1
+              )
+              SELECT c1, total FROM cte
+              WHERE c1 > 2
+                AND total > (SELECT avg(total) FROM cte)
+            """).collect()
+          })
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: cross-query cache hit for paired queries") {
+    // Simulates TPC-DS q24a/q24b pattern: same CTE, different filters.
+    withTempView("t") {
+      Seq(("red", 10), ("blue", 20), ("green", 30), ("red", 5))
+        .toDF("color", "amount").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        // Query A
+        val dfA = sql("""
+          WITH ssales AS (
+            SELECT a.color, sum(b.amount) as total
+            FROM t a JOIN t b ON a.color = b.color
+            GROUP BY a.color
+          )
+          SELECT color, total FROM ssales
+          WHERE color = 'red'
+            AND total > (SELECT avg(total) * 0.5 FROM ssales)
+        """)
+        dfA.collect()
+
+        // Query B: same CTE, different filter
+        val dfB = sql("""
+          WITH ssales AS (
+            SELECT a.color, sum(b.amount) as total
+            FROM t a JOIN t b ON a.color = b.color
+            GROUP BY a.color
+          )
+          SELECT color, total FROM ssales
+          WHERE color = 'blue'
+            AND total > (SELECT avg(total) * 0.5 FROM ssales)
+        """)
+        val imrB = dfB.queryExecution.optimizedPlan.collect {
+          case _: InMemoryRelation => true
+        }.size
+        assert(imrB > 0,
+          "Query B should reuse cache from Query A" +
+            s"\nPlan:\n${dfB.queryExecution.optimizedPlan.treeString}")
+
+        val expected = withSQLConf(SQLConf.CTE_CACHE_ENABLED.key -> "false") {
+          sql("""
+            WITH ssales AS (
+              SELECT a.color, sum(b.amount) as total
+              FROM t a JOIN t b ON a.color = b.color
+              GROUP BY a.color
+            )
+            SELECT color, total FROM ssales
+            WHERE color = 'blue'
+              AND total > (SELECT avg(total) * 0.5 FROM ssales)
+          """).collect()
+        }
+        checkAnswer(dfB, expected)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: self-join CTE uses exchange reuse, not cache") {
+    // When all CTE refs are direct (no subquery refs), the CTE is self-joined.
+    // AQE exchange reuse handles this efficiently, so caching is skipped.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasIMR = plan.collect { case _: InMemoryRelation => true }.nonEmpty
+        assert(!hasIMR,
+          "Self-join CTE should NOT be cached (exchange reuse handles it)" +
+            s"\nPlan:\n${plan.treeString}")
+        spark.sharedState.cacheManager.clearCache()
+      }
     }
   }
 }

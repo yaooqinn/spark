@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.optimizer._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.execution.datasources.{PruneFileSourcePartitions, PushVariantIntoScan, SchemaPruning, V1Writes}
 import org.apache.spark.sql.execution.datasources.v2.{GroupBasedRowLevelOperationScanPlanning, OptimizeMetadataOnlyDeleteFromTable, V2ScanPartitioningAndOrdering, V2ScanRelationPushDown, V2Writes}
@@ -31,7 +32,8 @@ import org.apache.spark.sql.execution.python.{ExtractGroupingPythonUDFFromAggreg
 class SparkOptimizer(
     catalogManager: CatalogManager,
     catalog: SessionCatalog,
-    experimentalMethods: ExperimentalMethods)
+    experimentalMethods: ExperimentalMethods,
+    session: SparkSession)
   extends Optimizer(catalogManager) {
 
   override def earlyScanPushDownRules: Seq[Rule[LogicalPlan]] =
@@ -96,7 +98,9 @@ class SparkOptimizer(
       ConstantFolding,
       EliminateLimits),
     Batch("User Provided Optimizers", fixedPoint, experimentalMethods.extraOptimizations: _*),
-    Batch("Replace CTE with Repartition", Once, ReplaceCTERefWithRepartition)))
+    Batch("Replace CTE with Cache", Once,
+      ReplaceCTERefWithInMemoryCache(session),
+      ReplaceCTERefWithRepartition)))
 
   override def nonExcludableRules: Seq[String] = super.nonExcludableRules ++
     Seq(

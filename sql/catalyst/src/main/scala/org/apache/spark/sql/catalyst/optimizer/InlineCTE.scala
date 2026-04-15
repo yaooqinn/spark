@@ -22,9 +22,10 @@ import scala.collection.mutable
 import org.apache.spark.sql.catalyst.analysis.DeduplicateRelations
 import org.apache.spark.sql.catalyst.expressions.{Alias, OuterReference, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.Inner
-import org.apache.spark.sql.catalyst.plans.logical.{CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, UnionLoop, WithCTE}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, CTERelationDef, CTERelationRef, Join, JoinHint, LogicalPlan, Project, Subquery, Union, UnionLoop, Window, WithCTE}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.{CTE, PLAN_EXPRESSION}
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * Inlines CTE definitions into corresponding references if either of the conditions satisfies:
@@ -55,14 +56,49 @@ case class InlineCTE(
     }
   }
 
-  private def shouldInline(cteDef: CTERelationDef, refCount: Int): Boolean = alwaysInline || {
+  private def shouldInline(cteDef: CTERelationDef, refInfo: CTEReferenceInfo): Boolean =
+    alwaysInline || {
     // We do not need to check enclosed `CTERelationRef`s for `deterministic` or `OuterReference`,
     // because:
     // 1) It is fine to inline a CTE if it references another CTE that is non-deterministic;
     // 2) Any `CTERelationRef` that contains `OuterReference` would have been inlined first.
-    refCount == 1 ||
-      cteDef.deterministic ||
-      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference]))
+    refInfo.refCount == 1 ||
+      cteDef.child.exists(_.expressions.exists(_.isInstanceOf[OuterReference])) ||
+      (cteDef.deterministic && !isCostlyToRepeat(cteDef, refInfo))
+  }
+
+  /**
+   * Determines whether a CTE is costly to repeat and would benefit from materialization.
+   * Uses a simple structural heuristic (inspired by Presto's CTE materialization):
+   * - The CTE must be referenced at least `minRefCount` times
+   * - The CTE must contain expensive operations (Join, Aggregate, or Window)
+   * - CTEs with UNION/UNION ALL are excluded because references typically
+   *   apply different filter predicates per branch
+   * - CTEs where all references are direct children (no subquery refs) are
+   *   excluded because AQE exchange reuse handles self-join dedup efficiently
+   *
+   * Controlled by `spark.sql.optimizer.cte.cache.enabled`.
+   */
+  private def isCostlyToRepeat(cteDef: CTERelationDef, refInfo: CTEReferenceInfo): Boolean = {
+    val minRefCount = conf.getConf(SQLConf.CTE_CACHE_MIN_REF_COUNT)
+    if (!conf.getConf(SQLConf.CTE_CACHE_ENABLED) || refInfo.refCount < minRefCount) {
+      return false
+    }
+    if (cteDef.child.exists(_.isInstanceOf[Union])) {
+      return false
+    }
+    // When requireSubqueryRef is true (default), skip pure self-join CTEs since AQE
+    // exchange reuse handles that pattern. Set to false to also cache such CTEs when
+    // the body is costly enough that columnar caching beats exchange reuse.
+    if (conf.getConf(SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF) && !refInfo.hasSubqueryRef) {
+      return false
+    }
+    cteDef.child.exists {
+      case _: Join => true
+      case _: Aggregate => true
+      case _: Window => true
+      case _ => false
+    }
   }
 
   /**
@@ -77,7 +113,8 @@ case class InlineCTE(
   private def buildCTEMap(
       plan: LogicalPlan,
       cteMap: mutable.Map[Long, CTEReferenceInfo],
-      outerCTEId: Option[Long] = None): Unit = {
+      outerCTEId: Option[Long] = None,
+      inSubquery: Boolean = false): Unit = {
     plan match {
       case WithCTE(child, cteDefs) =>
         val isDuplicated = cteDefs.forall(cteDef => cteMap.contains(cteDef.id))
@@ -101,13 +138,16 @@ case class InlineCTE(
           }
 
           cteDefs.foreach { cteDef =>
-            buildCTEMap(cteDef, cteMap, Some(cteDef.id))
+            buildCTEMap(cteDef, cteMap, Some(cteDef.id), inSubquery)
           }
-          buildCTEMap(child, cteMap, outerCTEId)
+          buildCTEMap(child, cteMap, outerCTEId, inSubquery)
         }
 
       case ref: CTERelationRef =>
         cteMap(ref.cteId) = cteMap(ref.cteId).withRefCountIncreased(1)
+        if (inSubquery) {
+          cteMap(ref.cteId) = cteMap(ref.cteId).copy(hasSubqueryRef = true)
+        }
 
         // The `outerCTEId` CTE definition can either reference `cteId` definition if `cteId` is in
         // the same or in an outer `WithCTE` node, or `outerCTEId` can contain `cteId` definition if
@@ -122,13 +162,14 @@ case class InlineCTE(
       case _ =>
         if (plan.containsPattern(CTE)) {
           plan.children.foreach { child =>
-            buildCTEMap(child, cteMap, outerCTEId)
+            buildCTEMap(child, cteMap, outerCTEId, inSubquery)
           }
 
           plan.expressions.foreach { expr =>
             if (expr.containsAllPatterns(PLAN_EXPRESSION, CTE)) {
               expr.foreach {
-                case e: SubqueryExpression => buildCTEMap(e.plan, cteMap, outerCTEId)
+                case e: SubqueryExpression =>
+                  buildCTEMap(e.plan, cteMap, outerCTEId, inSubquery = true)
                 case _ =>
               }
             }
@@ -164,7 +205,7 @@ case class InlineCTE(
           val refInfo = cteMap(cteDef.id)
           if (refInfo.refCount > 0) {
             val newDef = refInfo.cteDef.copy(child = inlineCTE(refInfo.cteDef.child, cteMap))
-            val inlineDecision = shouldInline(newDef, refInfo.refCount)
+            val inlineDecision = shouldInline(newDef, refInfo)
             cteMap(cteDef.id) = cteMap(cteDef.id).copy(
               cteDef = newDef, shouldInline = inlineDecision
             )
@@ -262,7 +303,8 @@ case class CTEReferenceInfo(
     refCount: Int,
     outgoingRefs: mutable.Map[Long, Int],
     shouldInline: Boolean,
-    container: Option[Long]) {
+    container: Option[Long],
+    hasSubqueryRef: Boolean = false) {
 
   def withRefCountIncreased(count: Int): CTEReferenceInfo = {
     copy(refCount = refCount + count)
