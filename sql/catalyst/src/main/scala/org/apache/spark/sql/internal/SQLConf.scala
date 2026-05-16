@@ -5868,6 +5868,33 @@ object SQLConf {
       .booleanConf
       .createWithDefault(true)
 
+  val CTE_CACHE_MAX_OUTPUT_ROWS =
+    buildConf("spark.sql.optimizer.cte.cache.maxOutputRows")
+      .doc("Upper bound on the estimated row count of a CTE plan output that is eligible for " +
+        "caching as InMemoryRelation. When the CTE plan's `Statistics.rowCount` is known and " +
+        "exceeds this value, the CTE is inlined instead of cached so that downstream filters / " +
+        "IN-subqueries can be pushed through. Use Long.MaxValue to disable the row-based gate. " +
+        "Only effective when spark.sql.optimizer.cte.cache.enabled is true; requires CBO " +
+        "(spark.sql.cbo.enabled=true) or other propagated rowCount stats to fire.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .longConf
+      .checkValue(_ > 0, "maxOutputRows must be positive")
+      .createWithDefault(Long.MaxValue)
+
+  val CTE_CACHE_MAX_OUTPUT_BYTES =
+    buildConf("spark.sql.optimizer.cte.cache.maxOutputBytes")
+      .doc("Upper bound on the estimated output size in bytes of a CTE plan that is eligible " +
+        "for caching as InMemoryRelation. When the CTE plan's `Statistics.sizeInBytes` is " +
+        "non-default and exceeds this value, the CTE is inlined instead of cached. Use " +
+        "Long.MaxValue to disable the byte-based gate. Only effective when " +
+        "spark.sql.optimizer.cte.cache.enabled is true.")
+      .version("4.2.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ > 0, "maxOutputBytes must be positive")
+      .createWithDefault(Long.MaxValue)
+
   val LEGACY_INLINE_CTE_IN_COMMANDS = buildConf("spark.sql.legacy.inlineCTEInCommands")
     .internal()
     .doc("If true, always inline the CTE relations for the queries in commands. This is the " +

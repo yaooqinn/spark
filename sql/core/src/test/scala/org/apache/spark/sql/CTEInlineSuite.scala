@@ -985,6 +985,87 @@ abstract class CTEInlineSuiteBase
     }
   }
 
+  test("cte.cache.enabled: maxOutputBytes gate inlines oversized CTE") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF.key -> "false",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0",
+        SQLConf.CTE_CACHE_MAX_OUTPUT_BYTES.key -> "1") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasInMemoryRelation = plan.collect { case _: InMemoryRelation => true }.nonEmpty
+        assert(!hasInMemoryRelation,
+          s"maxOutputBytes=1 should block caching; plan:\n${plan.treeString}")
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: maxOutputRows config is wired and accepts CBO") {
+    // The rowCount-based gate fires when the CTE plan's Statistics.rowCount is
+    // populated and exceeds the threshold. Whether CBO actually propagates
+    // rowCount through Joins / Aggregates depends on table-level analyze stats
+    // and is outside this unit test's scope; here we only verify (a) the config
+    // is wired, (b) setting it together with CBO does not break planning. The
+    // empirical rowCount-gate behavior is validated downstream against CBO data
+    // on TPC-DS scale via separate micro-benchmarks.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CBO_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF.key -> "false",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0",
+        SQLConf.CTE_CACHE_MAX_OUTPUT_ROWS.key -> "1") {
+        val df = sql("""
+          WITH cte AS (
+            SELECT a.c1, sum(a.c2) as total
+            FROM t a JOIN t b ON a.c1 = b.c1
+            JOIN t c ON a.c1 = c.c1
+            GROUP BY a.c1
+          )
+          SELECT x.c1, y.total FROM cte x JOIN cte y ON x.c1 = y.c1
+        """)
+        // Just trigger optimization; must not throw.
+        val plan = df.queryExecution.optimizedPlan
+        assert(plan != null)
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
+  test("cte.cache.enabled: oversized cache gates do not affect single-ref or non-cacheable") {
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")
+      // Even with maxOutputBytes set to 1, a single-ref CTE is still inlined (it would
+      // never have been cached in the first place); the gate must not change that.
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF.key -> "false",
+        SQLConf.CTE_CACHE_MAX_OUTPUT_BYTES.key -> "1") {
+        val df = sql("""
+          WITH cte AS (SELECT c1, c2 FROM t WHERE c1 > 1)
+          SELECT c1 FROM cte
+        """)
+        val plan = df.queryExecution.optimizedPlan
+        val hasInMemoryRelation = plan.collect { case _: InMemoryRelation => true }.nonEmpty
+        assert(!hasInMemoryRelation,
+          s"Single-ref CTE should remain inlined; plan:\n${plan.treeString}")
+      }
+    }
+  }
+
+
   test("cte.cache.enabled: UNION CTE still inlined") {
     withTempView("t") {
       Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")

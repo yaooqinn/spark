@@ -76,6 +76,9 @@ case class InlineCTE(
    *   apply different filter predicates per branch
    * - CTEs where all references are direct children (no subquery refs) are
    *   excluded because AQE exchange reuse handles self-join dedup efficiently
+   * - CTEs whose estimated output exceeds `maxOutputRows` / `maxOutputBytes`
+   *   are excluded; oversized cache materialization blocks predicate pushdown
+   *   from the outer query and tends to net-regress.
    *
    * Controlled by `spark.sql.optimizer.cte.cache.enabled`.
    */
@@ -91,6 +94,24 @@ case class InlineCTE(
     // exchange reuse handles that pattern. Set to false to also cache such CTEs when
     // the body is costly enough that columnar caching beats exchange reuse.
     if (conf.getConf(SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF) && !refInfo.hasSubqueryRef) {
+      return false
+    }
+    // Cost gate: skip caching when the estimated CTE output is too large. Caching a
+    // very large CTE moves the materialization barrier upstream of outer-query filters
+    // / IN-subqueries so predicate pushdown is structurally blocked, often making the
+    // cache build dominate. Both gates are vacuous (Long.MaxValue) by default. Stats
+    // values at sentinel-default (sizeInBytes >= defaultSizeInBytes) or that overflow
+    // Long bounds (rowCount > Long.MaxValue) are treated as "unreliable", and the gate
+    // is bypassed for them; in practice these overflows happen on multi-self-join CTEs
+    // where Catalyst CBO compounds cardinality without correlation modeling.
+    val maxRows = conf.getConf(SQLConf.CTE_CACHE_MAX_OUTPUT_ROWS)
+    val maxBytes = conf.getConf(SQLConf.CTE_CACHE_MAX_OUTPUT_BYTES)
+    val stats = cteDef.child.stats
+    val rowsKnown = stats.rowCount.exists(_ <= Long.MaxValue)
+    val rowsExceeded = rowsKnown && stats.rowCount.exists(_ > maxRows)
+    val bytesKnown = stats.sizeInBytes < conf.defaultSizeInBytes
+    val bytesExceeded = bytesKnown && stats.sizeInBytes > maxBytes
+    if (rowsExceeded || bytesExceeded) {
       return false
     }
     cteDef.child.exists {
