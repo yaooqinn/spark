@@ -944,6 +944,47 @@ abstract class CTEInlineSuiteBase
     }
   }
 
+  test("cte.cache.enabled: dangling sibling CTERelationRef does not crash") {
+    // Regression for a CheckAnalysis crash on the cte-cache path:
+    // ReplaceCTERefWithInMemoryCache.replaceWithCache passes cteDef.child to
+    // cacheManager.cacheQuery, which runs full session analysis. When a
+    // sibling CTE was skipped (e.g. did not meet minRefCount or
+    // requireSubqueryRef), processedChild still contains its CTERelationRef
+    // without an enclosing WithCTE; CheckAnalysis -> InlineCTE then crashes
+    // with NoSuchElementException in buildCTEMap. The fix detects dangling
+    // sibling refs in processedChild and skips caching that CTE.
+    withTempView("t") {
+      Seq((1, 10), (2, 20), (3, 30), (4, 40)).toDF("c1", "c2").createOrReplaceTempView("t")
+      withSQLConf(
+        SQLConf.CTE_CACHE_ENABLED.key -> "true",
+        SQLConf.CTE_CACHE_REQUIRE_SUBQUERY_REF.key -> "false",
+        SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "0") {
+        // Chained self-joining CTEs: each level references only its
+        // direct sibling, so under requireSubqueryRef=false the inner CTEs
+        // become cache candidates whose children reference siblings that
+        // themselves may or may not be cached at the time replaceWithCache
+        // visits them. Must not throw.
+        sql("""
+          WITH a AS (
+            SELECT t1.c1, sum(t2.c2) AS s
+            FROM t t1 JOIN t t2 ON t1.c1 = t2.c1
+            GROUP BY t1.c1
+          ),
+          b AS (
+            SELECT a1.c1, a1.s + a2.s AS s
+            FROM a a1 JOIN a a2 ON a1.c1 = a2.c1
+          ),
+          c AS (
+            SELECT b1.c1, b1.s * b2.s AS s
+            FROM b b1 JOIN b b2 ON b1.c1 = b2.c1
+          )
+          SELECT c1.c1 FROM c c1 JOIN c c2 ON c1.c1 = c2.c1
+        """).collect()
+        spark.sharedState.cacheManager.clearCache()
+      }
+    }
+  }
+
   test("cte.cache.enabled: UNION CTE still inlined") {
     withTempView("t") {
       Seq((1, 10), (2, 20), (3, 30)).toDF("c1", "c2").createOrReplaceTempView("t")

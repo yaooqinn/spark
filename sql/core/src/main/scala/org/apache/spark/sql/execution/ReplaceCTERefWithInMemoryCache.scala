@@ -86,8 +86,23 @@ case class ReplaceCTERefWithInMemoryCache(session: SparkSession) extends Rule[Lo
         } else {
           val name = cacheName(cteDef)
           val processedChild = replaceWithCache(cteDef.child, cteCache)
-          val existing = cacheManager.lookupCachedData(session, processedChild)
-          if (existing.isDefined) {
+          // Guard against dangling sibling CTERelationRef in processedChild.
+          // If a sibling CTE was not (yet) cached, processedChild still contains
+          // its CTERelationRef without an enclosing WithCTE. Passing such a plan
+          // to cacheManager.cacheQuery triggers session analysis, which runs
+          // CheckAnalysis -> InlineCTE and crashes on the orphaned ref
+          // (see InlineCTE.buildCTEMap NoSuchElementException). Skip caching
+          // this CTE in that case; ReplaceCTERefWithRepartition handles it.
+          val hasDanglingRef = processedChild.exists {
+            case r: CTERelationRef => !cteCache.contains(r.cteId)
+            case _ => false
+          }
+          val existing = if (hasDanglingRef) None
+            else cacheManager.lookupCachedData(session, processedChild)
+          if (hasDanglingRef) {
+            logInfo(s"CTE cache skipped for $name: dangling sibling refs")
+            uncached += cteDef
+          } else if (existing.isDefined) {
             logInfo(s"CTE cache hit: reusing existing cache for $name")
             cteCache.put(cteDef.id, existing.get.cachedRepresentation)
           } else if (refCounts(cteDef.id) >= minRefCount) {
