@@ -18,18 +18,20 @@
 package org.apache.spark.sql.execution.adaptive
 
 import org.apache.spark.sql.catalyst.expressions
-import org.apache.spark.sql.catalyst.expressions.{CreateNamedStruct, DynamicPruningExpression, ListQuery, Literal}
+import org.apache.spark.sql.catalyst.expressions.{CreateNamedStruct, DynamicPruningExpression, HashedRelationContainsSubquery, ListQuery, Literal}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{DYNAMIC_PRUNING_SUBQUERY, IN_SUBQUERY, SCALAR_SUBQUERY}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{DYNAMIC_PRUNING_SUBQUERY, HASHED_RELATION_CONTAINS_SUBQUERY, IN_SUBQUERY, SCALAR_SUBQUERY}
 import org.apache.spark.sql.execution
-import org.apache.spark.sql.execution.{InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec, SubqueryExec}
+import org.apache.spark.sql.execution.{InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec, SubqueryAdaptiveHashedRelationContainsExec, SubqueryExec}
+import org.apache.spark.sql.execution.runtimefilter.HashedRelationContainsExec
 
 case class PlanAdaptiveSubqueries(
     subqueryMap: Map[Long, SparkPlan]) extends Rule[SparkPlan] {
 
   def apply(plan: SparkPlan): SparkPlan = {
     plan.transformAllExpressionsWithPruning(
-      _.containsAnyPattern(SCALAR_SUBQUERY, IN_SUBQUERY, DYNAMIC_PRUNING_SUBQUERY)) {
+      _.containsAnyPattern(SCALAR_SUBQUERY, IN_SUBQUERY, DYNAMIC_PRUNING_SUBQUERY,
+        HASHED_RELATION_CONTAINS_SUBQUERY)) {
       case expressions.ScalarSubquery(_, _, exprId, _, _, _, _) =>
         val subquery = SubqueryExec.createForScalarSubquery(
           s"subquery#${exprId.id}", subqueryMap(exprId.id))
@@ -52,6 +54,17 @@ case class PlanAdaptiveSubqueries(
         val subquery = SubqueryAdaptiveBroadcastExec(name, broadcastKeyIndices, onlyInBroadcast,
           buildPlan, buildKeys, subqueryMap(exprId.id))
         DynamicPruningExpression(InSubqueryExec(value, subquery, exprId))
+      case HashedRelationContainsSubquery(pruningKey, buildPlan, buildKeys,
+          broadcastKeyIndices, exprId, _) =>
+        val name = s"hashedrelationcontains#${exprId.id}"
+        val subquery = SubqueryAdaptiveHashedRelationContainsExec(
+          name, buildKeys, broadcastKeyIndices, buildPlan, subqueryMap(exprId.id))
+        // Pack the probe key the same way the non-AQE rule does
+        // (PlanHashedRelationContainsFilters); composite-key packing lands in
+        // P2c, so single-key MVP per 0002c-contract.md section 1.
+        val packedProbeKey =
+          org.apache.spark.sql.execution.joins.HashJoin.rewriteKeyExpr(Seq(pruningKey)).head
+        HashedRelationContainsExec(packedProbeKey, subquery, exprId)
     }
   }
 }

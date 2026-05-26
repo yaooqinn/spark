@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.adaptive
 
 import org.apache.spark.sql.QueryTest
+import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
 import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
 import org.apache.spark.sql.internal.SQLConf
@@ -43,7 +44,8 @@ import org.apache.spark.sql.test.SharedSparkSession
  * (PlanAdaptiveSubqueries arm + AdaptiveSparkPlanExec rule slot +
  *  InsertAdaptiveSparkPlan.buildSubqueryMap match).
  */
-class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest with SharedSparkSession {
+class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
+  with SharedSparkSession with AdaptiveSparkPlanHelper {
 
   test("HRC fires under AQE on without crashing (P2b RED #1)") {
     // P2b RED #1: HRC on + AQE on (Spark 3.2+ default) must not crash.
@@ -98,7 +100,9 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest with SharedSp
         val exec = df.queryExecution.executedPlan
 
         // Invariant 1: HRCExec present somewhere in the AQE plan.
-        val hrcExecs = exec.collectWithSubqueries {
+        // Use the AdaptiveSparkPlanHelper.collectWithSubqueries which
+        // descends through AdaptiveSparkPlanExec / QueryStageExec.
+        val hrcExecs = collectWithSubqueries(exec) {
           case sp => sp.expressions.flatMap(_.collect {
             case e: HashedRelationContainsExec => e
           })
@@ -107,8 +111,10 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest with SharedSp
           s"Expected HashedRelationContainsExec under AQE.\nPlan:\n${exec.treeString}")
 
         // Invariant 2: exactly ONE BroadcastExchangeExec across AQE plan +
-        // subqueries (shared between BHJ build and HRC ref).
-        val allBroadcastExchanges = exec.collectWithSubqueries {
+        // subqueries (shared between BHJ build and HRC ref). Use AQE-aware
+        // helper so we descend into AdaptiveSparkPlanExec.executedPlan and
+        // QueryStageExec.plan.
+        val allBroadcastExchanges = collectWithSubqueries(exec) {
           case b: BroadcastExchangeExec => b
         }
         assert(allBroadcastExchanges.size == 1,
@@ -117,7 +123,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest with SharedSp
 
         // Invariant 3: at least one ReusedExchangeExec (reuse dedup fired
         // through ReuseAdaptiveSubquery rule, post-PlanAdaptiveHRCFilters).
-        val reused = exec.collectWithSubqueries {
+        val reused = collectWithSubqueries(exec) {
           case r: ReusedExchangeExec => r
         }
         assert(reused.nonEmpty,
@@ -148,7 +154,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest with SharedSp
         df.collect()
         val exec = df.queryExecution.executedPlan
 
-        val hrcExecs = exec.collectWithSubqueries {
+        val hrcExecs = collectWithSubqueries(exec) {
           case sp => sp.expressions.flatMap(_.collect {
             case e: HashedRelationContainsExec => e
           })
