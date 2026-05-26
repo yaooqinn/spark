@@ -164,8 +164,44 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
         assert(hrcExecs.nonEmpty,
           s"Expected at least one HashedRelationContainsExec after preparations, " +
             s"but found none.\nPlan:\n${executed.treeString}")
-        assert(hrcExecs.forall(_.ref.isInstanceOf[BroadcastedHashedRelationRef]),
+        assert(hrcExecs.forall(_.plan.isInstanceOf[BroadcastedHashedRelationRef]),
           "Every HashedRelationContainsExec must carry a BroadcastedHashedRelationRef.")
+      }
+    }
+  }
+
+  test("HRC end-to-end produces same answer as HRC off (P2a-5c-r2 RED #9)") {
+    // P2a-5c-r2 RED #9 (re-attempt after P2a-5c retract — see todos
+    // features/spark-hashed-relation-contains/docs/0002c-contract.md rev 2
+    // section 3.3 + docs/0004-investigation-peer-audit-pass.md for the
+    // ExecSubqueryExpression-based redesign). The query must collect the
+    // same row set with HRC enabled vs disabled. Until the rev 2 §3.3
+    // implementation lands (ExecSubqueryExpression mixin + updateResult
+    // hook + plan: BaseSubqueryExec field + canonicalized impl), this RED
+    // either throws UOE (current scaffold) or NPE (rev 1 shape, retracted).
+    withSQLConf(
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val withHrc = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        assert(withHrc == baseline,
+          s"HRC on must produce identical row set vs HRC off.\n" +
+            s"  baseline (HRC off, size=${baseline.size}): " +
+            s"${baseline.toSeq.sorted.take(20)}\n" +
+            s"  withHrc  (HRC on,  size=${withHrc.size}):  " +
+            s"${withHrc.toSeq.sorted.take(20)}")
       }
     }
   }
