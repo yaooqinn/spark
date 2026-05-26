@@ -122,4 +122,51 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
       "org.apache.spark.sql.execution.runtimefilter.PlanHashedRelationContainsFilters"
     assert(PlanHashedRelationContainsFilters(spark).ruleName == expected)
   }
+
+  test("PlanHashedRelationContainsFilters rewrites placeholder to HRCExec (P2a-5b RED #8)") {
+    // P2a-5b RED #8: behavioral RED for physical rewrite. After preparations,
+    // the logical HashedRelationContainsSubquery placeholder must be eliminated
+    // and replaced by a HashedRelationContainsExec wrapping a
+    // BroadcastedHashedRelationRef whose child is the sibling BHJ's
+    // BroadcastExchangeExec (sameResult reuse). End-to-end .collect() not
+    // exercised here because HashedRelationContainsExec.eval/doGenCode remain
+    // scaffold UOEs until P2a-5c.
+    //
+    // AQE must be off for this slice: InsertAdaptiveSparkPlan is also a
+    // preparations rule and wraps everything as a leaf AdaptiveSparkPlanExec,
+    // causing all subsequent preparations rules (including ours) to no-op.
+    // AQE-aware HRC rewrite lands in P2b (PlanAdaptiveHashedRelationContainsFilters).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k")
+        val executed = df.queryExecution.executedPlan
+
+        // 1. Logical placeholder must NOT survive into the executed plan.
+        val survivedPlaceholders = executed.flatMap { sp =>
+          sp.expressions.flatMap(_.collect { case s: HashedRelationContainsSubquery => s })
+        }
+        assert(survivedPlaceholders.isEmpty,
+          s"HashedRelationContainsSubquery placeholder should be rewritten by " +
+            s"PlanHashedRelationContainsFilters but survived.\nPlan:\n${executed.treeString}")
+
+        // 2. HashedRelationContainsExec wrapping a BroadcastedHashedRelationRef
+        //    must appear (rewrite landed).
+        val hrcExecs = executed.flatMap { sp =>
+          sp.expressions.flatMap(_.collect { case e: HashedRelationContainsExec => e })
+        }
+        assert(hrcExecs.nonEmpty,
+          s"Expected at least one HashedRelationContainsExec after preparations, " +
+            s"but found none.\nPlan:\n${executed.treeString}")
+        assert(hrcExecs.forall(_.ref.isInstanceOf[BroadcastedHashedRelationRef]),
+          "Every HashedRelationContainsExec must carry a BroadcastedHashedRelationRef.")
+      }
+    }
+  }
 }
