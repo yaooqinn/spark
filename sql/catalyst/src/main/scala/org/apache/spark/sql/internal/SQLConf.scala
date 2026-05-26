@@ -770,6 +770,64 @@ object SQLConf {
       .longConf
       .createWithDefault(67108864L)
 
+  val RUNTIME_HASHED_RELATION_CONTAINS_ENABLED =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.enabled")
+      .doc("When true, inject a HashedRelation.contains() runtime filter on the probe " +
+        "side of a broadcast hash join, reusing the build-side hashed relation broadcast " +
+        "without driver-side collect. Targets cases where Bloom filters do not apply " +
+        "(BHJ-only) and where exact (non-probabilistic) probe-row pruning is cheaper " +
+        "than the inject-time materialization tax of an InSubquery rewrite.")
+      .version("5.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  val RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.minApplicationSize")
+      .doc("Skip HashedRelationContains injection when the probe-side estimated row count " +
+        "is below this value. Prevents subquery-setup overhead from dwarfing tiny-probe wins.")
+      .version("5.0.0")
+      .longConf
+      .checkValue(_ >= 0L, "The minimum application size must be >= 0")
+      .createWithDefault(10000L)
+
+  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxBuildSize")
+      .doc("Skip HashedRelationContains injection when the broadcast build-side row count " +
+        "exceeds this value. Above this size, the Bloom filter (smaller per-row cost) wins " +
+        "the cost model.")
+      .version("5.0.0")
+      .longConf
+      .checkValue(_ >= 0L, "The maximum build size must be >= 0")
+      .createWithDefault(1000000L)
+
+  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxFiltersPerScan")
+      .doc("Per-scan cap on the number of HashedRelationContains predicates that may be " +
+        "injected on a single probe scan. Empirically chosen to limit per-row hash cost " +
+        "from outweighing per-filter selectivity gains.")
+      .version("5.0.0")
+      .intConf
+      .checkValue(_ >= 0, "The maximum filters per scan must be >= 0")
+      .createWithDefault(8)
+
+  val RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.creationSideThreshold")
+      .doc("Size threshold (in bytes) of the HashedRelationContains creation side plan. " +
+        "Estimated size needs to be under this value to try to inject the filter. Mirrors " +
+        "the Bloom-filter creation-side threshold to keep build-side broadcast cheap.")
+      .version("5.0.0")
+      .bytesConf(ByteUnit.BYTE)
+      .createWithDefaultString("10MB")
+
+  val RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.costModel.bloomMutualExclusion")
+      .doc("When true and both the HashedRelationContains rule and the Bloom-filter rule " +
+        "select the same (scan, joinKey) pair, prefer HashedRelationContains if the " +
+        "broadcast build size is within maxBuildSize, otherwise fall back to Bloom.")
+      .version("5.0.0")
+      .booleanConf
+      .createWithDefault(true)
+
   val RUNTIME_ROW_LEVEL_OPERATION_GROUP_FILTER_ENABLED =
     buildConf("spark.sql.optimizer.runtime.rowLevelOperationGroupFilter.enabled")
       .doc("Enables runtime filtering for group-based and delta-based row-level operations. " +
@@ -7614,6 +7672,24 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
 
   def runtimeFilterCreationSideThreshold: Long =
     getConf(RUNTIME_BLOOM_FILTER_CREATION_SIDE_THRESHOLD)
+
+  def runtimeFilterHashedRelationContainsEnabled: Boolean =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_ENABLED)
+
+  def runtimeFilterHashedRelationContainsMinApplicationSize: Long =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE)
+
+  def runtimeFilterHashedRelationContainsMaxBuildSize: Long =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE)
+
+  def runtimeFilterHashedRelationContainsMaxFiltersPerScan: Int =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN)
+
+  def runtimeFilterHashedRelationContainsCreationSideThreshold: Long =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD)
+
+  def runtimeFilterHashedRelationContainsBloomMutualExclusion: Boolean =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION)
 
   def runtimeRowLevelOperationGroupFilterEnabled: Boolean =
     getConf(RUNTIME_ROW_LEVEL_OPERATION_GROUP_FILTER_ENABLED)
