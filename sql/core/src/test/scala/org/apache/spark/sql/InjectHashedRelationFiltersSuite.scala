@@ -20,6 +20,7 @@ package org.apache.spark.sql
 import org.apache.spark.sql.catalyst.expressions.HashedRelationContainsSubquery
 import org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters
 import org.apache.spark.sql.catalyst.plans.logical.Filter
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
 import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec, PlanHashedRelationContainsFilters}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
@@ -202,6 +203,82 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
             s"${baseline.toSeq.sorted.take(20)}\n" +
             s"  withHrc  (HRC on,  size=${withHrc.size}):  " +
             s"${withHrc.toSeq.sorted.take(20)}")
+      }
+    }
+  }
+
+  test("HRC reuse-fired plan-shape invariants (P2a-5d sentinel #10)") {
+    // P2a-5d regression sentinel for the reuse-broadcast invariant lifted
+    // from P2a-5c F2.2 (stage5-code-review-P2a-5c.md). End-to-end checkAnswer
+    // in RED #9 only proves answer parity, not reuse parity -- a TrueLiteral
+    // fallback would also yield correct answers. This test asserts the
+    // raison-d'etre of HRC: BHJ and HRC must SHARE the BroadcastExchange,
+    // never plan a second one (silent M1-shape regression).
+    //
+    // Spike evidence /tmp/hrc-m2-p2a-5d-1-spike.log 2026-05-26 verbatim:
+    //   ReusedExchangeExec count = 1
+    //   HRCExec.plan.class = BroadcastedHashedRelationRef
+    //   plan tree: BHJ build = BroadcastExchange [plan_id=82]
+    //              HRC ref   = BroadcastExchange [plan_id=82]   (same id)
+    //              probe pre-filter = ReusedExchange [plan_id=82]
+    //
+    // No production change paired with this test -- it codifies the invariant
+    // already established by P2a-5c-r2 GREEN end-to-end. Future P2b (AQE) and
+    // P2c (composite key) MUST keep it green.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k")
+        // Run to materialize ReusedExchange dedup (preparations run on access).
+        df.collect()
+        val exec = df.queryExecution.executedPlan
+
+        // Invariant 1: HRCExec present and carries the expected subquery type.
+        val hrcExecs = exec.flatMap { sp =>
+          sp.expressions.flatMap(_.collect { case e: HashedRelationContainsExec => e })
+        }
+        assert(hrcExecs.nonEmpty,
+          s"Expected at least one HashedRelationContainsExec.\nPlan:\n${exec.treeString}")
+        // Accept bare ref OR ReusedSubqueryExec wrap (Gap D dispatch covers both).
+        hrcExecs.foreach { e =>
+          val isRef = e.plan.isInstanceOf[BroadcastedHashedRelationRef]
+          val isReusedRef = e.plan match {
+            case org.apache.spark.sql.execution.ReusedSubqueryExec(_: BroadcastedHashedRelationRef) =>
+              true
+            case _ => false
+          }
+          assert(isRef || isReusedRef,
+            s"HRCExec.plan must be BroadcastedHashedRelationRef or " +
+              s"ReusedSubqueryExec(BroadcastedHashedRelationRef); got ${e.plan.getClass.getName}")
+        }
+
+        // Invariant 2: exactly ONE BroadcastExchangeExec total across the whole
+        // plan including subqueries -- BHJ and HRC must SHARE it. Two = silent
+        // M1-shape regression (second broadcast materialization). Use
+        // collectWithSubqueries to descend into the HRC subquery subtree.
+        val allBroadcastExchanges = exec.collectWithSubqueries {
+          case b: BroadcastExchangeExec => b
+        }
+        assert(allBroadcastExchanges.size == 1,
+          s"HRC must reuse the BHJ BroadcastExchange. Found " +
+            s"${allBroadcastExchanges.size} BroadcastExchangeExec instances " +
+            s"(expected 1).\nPlan:\n${exec.treeString}")
+
+        // Invariant 3: at least one ReusedExchangeExec -- proves dedup fired
+        // (the second BroadcastExchange the rule planned was collapsed by
+        // ReuseExchangeAndSubquery).
+        val reused = exec.collectWithSubqueries {
+          case r: ReusedExchangeExec => r
+        }
+        assert(reused.nonEmpty,
+          s"Expected at least one ReusedExchangeExec (reuse must fire).\n" +
+            s"Plan:\n${exec.treeString}")
       }
     }
   }
