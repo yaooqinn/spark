@@ -20,7 +20,7 @@ package org.apache.spark.sql
 import org.apache.spark.sql.catalyst.expressions.HashedRelationContainsSubquery
 import org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters
 import org.apache.spark.sql.catalyst.plans.logical.Filter
-import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
+import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec, PlanHashedRelationContainsFilters}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 
@@ -112,5 +112,14 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
             s"but found none.\nPlan:\n${optimized.treeString}")
       }
     }
+  }
+
+  test("PlanHashedRelationContainsFilters rule object exists (P2a-5a RED #7)") {
+    // P2a-5a RED #7: existence + ruleName anchor for the new physical preparations
+    // rule. Identity scaffold in this slice; real apply (sameResult reuse +
+    // BroadcastExchangeExec wrap + Filter(HRCExec) rewrite) lands in P2a-5b.
+    val expected =
+      "org.apache.spark.sql.execution.runtimefilter.PlanHashedRelationContainsFilters"
+    assert(PlanHashedRelationContainsFilters(spark).ruleName == expected)
   }
 }
