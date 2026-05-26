@@ -282,4 +282,73 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
       }
     }
   }
+
+  test("HashedRelationContainsExec does not mix in CodegenFallback (P2c-0 RED #11)") {
+    // P2c-0 RED #11 (codegen mandate per todos
+    // features/spark-hashed-relation-contains/docs/0008-investigation-p2c-0-codegen-design.md
+    // rev 2 + stage2-design-review-r9). HashedRelationContainsExec currently
+    // mixes in CodegenFallback (HashedRelationContainsExec.scala L61 + L50-51
+    // self-batch "MVP scope: CodegenFallback path. First-class doGenCode is a
+    // later optimization slice"). SPIP Q7 / impl-plan section 7 Open Q3 mandate
+    // first-class doGenCode for PR #1; this test anchors the class-shape RED.
+    //
+    // Reflection-based anchor (most stable): CodegenFallback presence in the
+    // linearization implies the per-row eval path (nullSafeEval wrapper). After
+    // P2c-0 GREEN, the trait must be gone -- doGenCode is implemented inline,
+    // mirroring BloomFilterMightContain.doGenCode + BHJ.prepareBroadcast.
+    val klass = classOf[HashedRelationContainsExec]
+    val fallbackTrait =
+      classOf[org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback]
+    val mixesIn = fallbackTrait.isAssignableFrom(klass)
+    assert(!mixesIn,
+      s"HashedRelationContainsExec must NOT mix in CodegenFallback after P2c-0 " +
+        s"(per decision rev9 D7 codegen mandate). doGenCode must be implemented " +
+        s"inline using ctx.addReferenceObj(broadcast) + relationTerm.getValue lookup " +
+        s"(peer: BHJ.prepareBroadcast + BloomFilterMightContain.doGenCode). " +
+        s"Current linearization includes ${fallbackTrait.getName}.")
+  }
+
+  test("HashedRelationContainsExec emits inline broadcast-ref codegen (P2c-0 RED #12)") {
+    // P2c-0 RED #12: end-to-end behavioural anchor. After P2c-0 GREEN,
+    // HashedRelationContainsExec.doGenCode injects the broadcast handle via
+    // ctx.addReferenceObj("broadcast", this.broadcast), which produces a
+    // generated Java snippet like:
+    //   ((org.apache.spark.broadcast.Broadcast) references[$idx] /* broadcast */)
+    // This is the HRC-SPECIFIC anchor that distinguishes HRC's broadcast-ref
+    // codegen from BHJ's prepareBroadcast (BHJ uses
+    // buildPlan.executeBroadcast() captured into its own broadcast variable;
+    // the comment "/* broadcast */" appears in BHJ's generated source too, but
+    // the surrounding hashedrelationcontains#NNN identifier is HRC-unique).
+    //
+    // RED while CodegenFallback is mixed in: HRC falls back to per-row Scala
+    // eval(), no inline broadcast reference is emitted in the generated Java
+    // -- the only broadcast reference present is BHJ's, not HRC's.
+    import org.apache.spark.sql.execution.debug.codegenString
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k")
+        df.collect()
+        val codegenDump = codegenString(df.queryExecution.executedPlan)
+        // Anchor: HRC.doGenCode emits a mutable state named "hrcRelation_N"
+        // via ctx.addMutableState(HashedRelation.class.getName, "hrcRelation",
+        // forceInline=true) -- this is HRC-unique (BHJ's prepareBroadcast uses
+        // "relation_N" without the "hrc" prefix). CodegenFallback path emits
+        // neither (HRC predicate hidden behind nullSafeEval).
+        val hasHrcMutableState = codegenDump.contains("hrcRelation")
+        assert(hasHrcMutableState,
+          s"Expected `hrcRelation` mutable state in generated Java (proves HRC " +
+            s"doGenCode inlined ctx.addMutableState(HashedRelation, \"hrcRelation\", " +
+            s"forceInline=true) + relationTerm.getValue lookup; CodegenFallback " +
+            s"hides the predicate behind nullSafeEval wrapper).\n" +
+            s"Generated Java dump head (first 4000 chars):\n${codegenDump.take(4000)}")
+      }
+    }
+  }
 }
