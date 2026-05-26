@@ -20,6 +20,7 @@ package org.apache.spark.sql
 import org.apache.spark.sql.catalyst.expressions.HashedRelationContainsSubquery
 import org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters
 import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 
 /**
@@ -65,5 +66,19 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
     // forced at P2a RED time).
     assert(classOf[HashedRelationContainsExec].getPackage.getName ==
       "org.apache.spark.sql.execution.runtimefilter")
+  }
+
+  test("HRC SQLConf keys exposed with documented defaults (P2a-3)") {
+    // P2a-3 RED #5: six SQLConf keys per docs/0002c-contract.md §2.
+    // Default values match the contract verbatim; documentation and
+    // version strings are checked by the AllSparkConf golden file.
+    val conf = SQLConf.get
+    assert(!conf.runtimeFilterHashedRelationContainsEnabled,
+      "enabled default should be false until PR #5 flip")
+    assert(conf.runtimeFilterHashedRelationContainsMinApplicationSize == 10000L)
+    assert(conf.runtimeFilterHashedRelationContainsMaxBuildSize == 1000000L)
+    assert(conf.runtimeFilterHashedRelationContainsMaxFiltersPerScan == 8)
+    assert(conf.runtimeFilterHashedRelationContainsCreationSideThreshold == 10L * 1024 * 1024)
+    assert(conf.runtimeFilterHashedRelationContainsBloomMutualExclusion)
   }
 }
