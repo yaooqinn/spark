@@ -19,6 +19,7 @@ package org.apache.spark.sql
 
 import org.apache.spark.sql.catalyst.expressions.HashedRelationContainsSubquery
 import org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters
+import org.apache.spark.sql.catalyst.plans.logical.Filter
 import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
@@ -80,5 +81,36 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
     assert(conf.runtimeFilterHashedRelationContainsMaxFiltersPerScan == 8)
     assert(conf.runtimeFilterHashedRelationContainsCreationSideThreshold == 10L * 1024 * 1024)
     assert(conf.runtimeFilterHashedRelationContainsBloomMutualExclusion)
+  }
+
+  test("InjectHashedRelationFilters injects HRC subquery on BHJ probe side (P2a-4)") {
+    // P2a-4 RED #6: the first behavioral RED. Constructs a tiny equi-join where
+    // one side is broadcastable and the other is not; expects the rule to wrap
+    // the probe-side scan in a Filter(HashedRelationContainsSubquery(...)).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      // Disable Bloom so its inject doesn't perturb the assertion. HRC is the
+      // only runtime filter under test in this slice.
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+
+      // Small build side (broadcastable under 5000-byte threshold) joined with
+      // a synthetic 10_000-row probe (not broadcastable). The rule should inject
+      // a HashedRelationContainsSubquery on the probe-side Range scan.
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.nonEmpty,
+          s"Expected at least one HashedRelationContainsSubquery in the optimized plan, " +
+            s"but found none.\nPlan:\n${optimized.treeString}")
+      }
+    }
   }
 }
