@@ -61,6 +61,8 @@ class SparkOptimizer(
       new RowLevelOperationRuntimeGroupFiltering(OptimizeSubqueries)),
     Batch("InjectRuntimeFilter", FixedPoint(1),
       InjectRuntimeFilter),
+    Batch("InjectHashedRelationFilters", FixedPoint(1),
+      InjectHashedRelationFilters),
     Batch("MergeSubplans", Once,
       MergeSubplans,
       RewriteDistinctAggregates),
