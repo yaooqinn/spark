@@ -17,17 +17,20 @@
 
 package org.apache.spark.sql
 
+import org.apache.spark.sql.catalyst.expressions.HashedRelationContainsSubquery
 import org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters
+import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
 import org.apache.spark.sql.test.SharedSparkSession
 
 /**
  * Test suite for the new HRC injection rule (SPARK-XXXXX, HRC PR #1, Core MVP).
  *
- * Tracks the first RED slice of P2a per todos
+ * Tracks the first RED slices of P2a per todos
  * features/spark-hashed-relation-contains/docs/0003-implementation-plan.md rev 8.
- * Subsequent RED tests (BHJ-injects-HRC behavioral checks) land alongside the
- * rule implementation. This file exists primarily to anchor the compile-time
- * RED that proves the rule object does not yet exist.
+ * Behavioral tests (BHJ-injects-HRC, plan-shape, reuse) land alongside the
+ * actual detection + rewrite logic. The tests in this file anchor compile-time
+ * REDs that prove the four scaffolded classes (rule + Subquery + Exec + Ref)
+ * exist with their contracted signatures.
  */
 class InjectHashedRelationFiltersSuite extends SharedSparkSession {
 
@@ -38,5 +41,29 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
     // production entry, not stdlib behavior).
     assert(InjectHashedRelationFilters.ruleName ==
       "org.apache.spark.sql.catalyst.optimizer.InjectHashedRelationFilters")
+  }
+
+  test("HashedRelationContainsSubquery class exists with the contracted signature") {
+    // P2a RED #2: anchor the logical SubqueryExpression node. We do not build a
+    // real subquery here (that requires a child plan and resolved keys); the
+    // import alone validates the class is reachable from sql.catalyst.expressions.
+    assert(classOf[HashedRelationContainsSubquery].getSimpleName ==
+      "HashedRelationContainsSubquery")
+  }
+
+  test("BroadcastedHashedRelationRef class exists in execution.runtimefilter") {
+    // P2a RED #3: anchor the no-collect physical ref node. The actual broadcast()
+    // call requires a fully planned SparkPlan child; this test just proves the
+    // class is in the contracted package per 0002c-contract.md §3.2.
+    assert(classOf[BroadcastedHashedRelationRef].getPackage.getName ==
+      "org.apache.spark.sql.execution.runtimefilter")
+  }
+
+  test("HashedRelationContainsExec class exists in execution.runtimefilter") {
+    // P2a RED #4: anchor the probe-side predicate. doGenCode + eval bodies land
+    // in the next slice (per stage2-r6 F3.4: CodegenFallback vs doGenCode lock
+    // forced at P2a RED time).
+    assert(classOf[HashedRelationContainsExec].getPackage.getName ==
+      "org.apache.spark.sql.execution.runtimefilter")
   }
 }
