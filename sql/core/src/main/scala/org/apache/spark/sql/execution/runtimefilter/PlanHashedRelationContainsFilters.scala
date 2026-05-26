@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.runtimefilter
 
-import org.apache.spark.sql.catalyst.expressions.{BindReferences, HashedRelationContainsSubquery, Literal}
+import org.apache.spark.sql.catalyst.expressions.{BindReferences, HashedRelationContainsSubquery, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.HASHED_RELATION_CONTAINS_SUBQUERY
@@ -86,7 +86,7 @@ case class PlanHashedRelationContainsFilters(sparkSession: SparkSession)
           // composite-key
           // packing lands in P2c.
           val packedProbeKey = HashJoin.rewriteKeyExpr(Seq(pruningKey)).head
-          HashedRelationContainsExec(packedProbeKey, ref)
+          HashedRelationContainsExec(packedProbeKey, ref, NamedExpression.newExprId)
         } else {
           // No reusable sibling BHJ broadcast: drop the filter. BHJ runs
           // unchanged. We intentionally do NOT plan a second
