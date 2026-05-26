@@ -21,7 +21,8 @@ import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression, Predicate}
-import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
+import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode, FalseLiteral, JavaCode, TrueLiteral}
+import org.apache.spark.sql.catalyst.expressions.codegen.Block.BlockHelper
 import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.execution.{BaseSubqueryExec, ExecSubqueryExpression, ReusedSubqueryExec}
 import org.apache.spark.sql.execution.joins.HashedRelation
@@ -47,8 +48,21 @@ import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
  *      task closures, dereferenced on executors via .value. Catalyst nulls
  *      this in canonicalized for stable equality.
  *
- * MVP scope: CodegenFallback path. First-class doGenCode (KeyAccessor inline
- * lookup) is a later optimization slice.
+ * Codegen path (P2c-0, per decision rev9 D7): first-class doGenCode emits an
+ * inline `relation.getValue(key) != null` lookup. The broadcast handle is
+ * wired into the codegen context via ctx.addReferenceObj (mirrors BHJ
+ * prepareBroadcast in BroadcastHashJoinExec.scala line 192-205) and the
+ * HashedRelation is materialized as a mutable state via addMutableState
+ * forceInline=true. The result-shape boilerplate mirrors
+ * BloomFilterMightContain.doGenCode (line 106-121): single-expr boolean
+ * predicate with null-safe guard on the probe key. The interpreted eval()
+ * path is retained as a fallback (same pattern as BloomFilterMightContain).
+ *
+ * Composite-key probe path (UnsafeRow lookup, single-Long packing fallback)
+ * lands in P2c-1 (docs/0007-investigation-p2c-1-composite-key-design.md).
+ * The current codegen branch covers only the LongType packed-key path; the
+ * eval() fallback at line 100-103 already handles InternalRow probe keys for
+ * runtime correctness until P2c-1 extends doGenCode.
  */
 case class HashedRelationContainsExec(
     packedProbeKey: Expression,
@@ -57,8 +71,7 @@ case class HashedRelationContainsExec(
     var broadcast: Broadcast[HashedRelation] = null)
   extends ExecSubqueryExpression
   with UnaryLike[Expression]
-  with Predicate
-  with CodegenFallback {
+  with Predicate {
 
   override def child: Expression = packedProbeKey
 
@@ -103,6 +116,55 @@ case class HashedRelationContainsExec(
           relation.get(key.asInstanceOf[InternalRow]) != null
       }
     }
+  }
+
+  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+    // Codegen path for the LongType packed-key fast path (P2c-0). Composite
+    // UnsafeRow probe keys hit the interpreted eval() fallback above until
+    // P2c-1 extends this method. We deliberately collapse BHJ's
+    // keyIsUnique branching here because HRC only cares about existence:
+    // HashedRelation.getValue returns the first matched row (or null) which
+    // is equivalent to (get(key) != null) for contains semantics. See
+    // grep-verified contract in HashedRelation.scala line 43-72 trait + line
+    // 1005-1023 LongHashedRelation + line 231-264 UnsafeHashedRelation:
+    // every implementation returns null on no-match, single-row or first-of-
+    // many on hit. Skeleton mirrors BloomFilterMightContain.doGenCode
+    // line 106-121 (single-expr boolean predicate, null-safe).
+    if (broadcast == null) {
+      // Defensive: updateResult should have populated this before codegen.
+      // Mirror BloomFilterMightContain behaviour on a null filter.
+      return ev.copy(isNull = TrueLiteral, value = JavaCode.defaultLiteral(dataType))
+    }
+    if (packedProbeKey.dataType != LongType) {
+      // Composite UnsafeRow path lands in P2c-1; until then, emit a per-row
+      // call to this.eval(input) so generated Java still compiles and exercises
+      // the interpreted fallback at line 109-119. Mirrors the CodegenFallback
+      // pattern but scoped to the non-Long branch only.
+      val thisRef = ctx.addReferenceObj("hrc", this, classOf[Expression].getName)
+      val inputRow = ctx.INPUT_ROW
+      return ev.copy(code = code"""
+        boolean ${ev.isNull} = false;
+        boolean ${ev.value} = (Boolean) $thisRef.eval($inputRow);""",
+        isNull = FalseLiteral)
+    }
+    val broadcastRef = ctx.addReferenceObj("broadcast", broadcast,
+      classOf[Broadcast[HashedRelation]].getName)
+    val clsName = classOf[HashedRelation].getName
+    val relationTerm = ctx.addMutableState(clsName, "hrcRelation",
+      v =>
+        s"""
+           | $v = (($clsName) $broadcastRef.value()).asReadOnlyCopy();
+         """.stripMargin,
+      forceInline = true)
+    val keyEval = packedProbeKey.genCode(ctx)
+    ev.copy(code = code"""
+      ${keyEval.code}
+      boolean ${ev.isNull} = false;
+      boolean ${ev.value} = false;
+      if (!${keyEval.isNull}) {
+        ${ev.value} = $relationTerm.getValue(${keyEval.value}) != null;
+      }""",
+      isNull = FalseLiteral)
   }
 
   override lazy val canonicalized: HashedRelationContainsExec = copy(
