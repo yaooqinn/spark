@@ -848,4 +848,50 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC does not inject on non-equi join (P2c-3 C.4 SPIP (e))") {
+    // SPIP (e): the rule pattern-matches via ExtractEquiJoinKeys
+    // (patterns.scala:L187+) which returns None when the join condition
+    // contains no equality predicate. A non-equi join (e.g. probe.k <
+    // build.k) therefore never enters maybeInjectProbe at all. GREEN-on-HEAD
+    // sentinel; vacuous-pass guard asserts an actual non-equi join node
+    // exists in the executed plan (BroadcastNestedLoopJoinExec when one side
+    // is broadcastable) so the 0-HRC-inject assertion isn't trivially true
+    // because no join was planned.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build " +
+            "ON probe.k < build.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.isEmpty,
+          s"On a non-equi join (probe.k < build.k) the HRC rule must not " +
+            s"inject (ExtractEquiJoinKeys non-match), but found ${injected.size}." +
+            s"\nPlan:\n${optimized.treeString}")
+        // Vacuous-pass guard: confirm a real join actually exists in the
+        // executed plan. With BROADCAST(build), Spark plans non-equi joins
+        // as BroadcastNestedLoopJoinExec.
+        val executed = df.queryExecution.executedPlan
+        val bnlj = executed.collect {
+          case b: org.apache.spark.sql.execution.joins.BroadcastNestedLoopJoinExec => b
+        }
+        assert(bnlj.nonEmpty,
+          s"SPIP (e) sentinel precondition not met: expected " +
+            s"BroadcastNestedLoopJoinExec in the executed plan (non-equi join " +
+            s"with BROADCAST hint), but none found. Without an actual " +
+            s"non-equi join, the 0-HRC-inject assertion above is vacuous.\n" +
+            s"Plan:\n${executed.treeString}")
+      }
+    }
+  }
 }
