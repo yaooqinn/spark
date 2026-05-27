@@ -757,4 +757,54 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  // C.2 SPIP (c) tiny probe -> not injected.
+  // pending-p2d: HRC has a registered SQLConf
+  // RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE
+  // (accessor: runtimeFilterHashedRelationContainsMinApplicationSize), but
+  // grep against InjectHashedRelationFilters.scala HEAD 6a79b4a0c4b shows 0
+  // hits for the accessor or the conf key inside the rule body. The rule
+  // gates injection on canBroadcastBySize for build/probe and on
+  // runtimeFilterHashedRelationContainsEnabled / Bloom mutual-exclusion only;
+  // probe stats are NOT consulted today. Authoring this test as `test(...)`
+  // would either (a) FAIL because HRC still injects on a non-broadcastable
+  // probe regardless of row count (real-but-deferred RED), or (b) PASS for
+  // the wrong reason if the probe happens to be broadcastable too (vacuous
+  // C.5 overlap). Both shapes hide the truth.
+  //
+  // Honest disposition (0012-investigation-p2c-3-correctness-audit-design.md
+  // rev3 §2 / §2.1 + plan rev16 P2c-3 Gate C C.2 row): mark as `ignore` so
+  // the slot is reserved but the suite count is unchanged. Activate (flip
+  // `ignore` -> `test`) in P2d after MinApplicationSize is wired into
+  // InjectHashedRelationFilters.apply / maybeInjectProbe. The body below is
+  // the intended GREEN-after-P2d shape, kept here so reactivation is a
+  // one-keyword edit.
+  ignore("HRC does not inject when probe is below MinApplicationSize " +
+    "(P2c-3 C.2 SPIP (c)) [pending-p2d: MinApplicationSize not wired]") {
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      // Force the probe NOT broadcastable on its own so the C.5 early-return
+      // at maybeInjectProbe:L105 cannot mask the intended SPIP (c) check.
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        // 10 rows: well below any reasonable MIN_APPLICATION_SIZE; once P2d
+        // wires the threshold, this probe should be deemed too small to be
+        // worth filtering, so HRC must NOT inject.
+        spark.range(10).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe JOIN build ON probe.k = build.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.isEmpty,
+          s"With probe row count below MinApplicationSize, the HRC rule must " +
+            s"not inject, but found ${injected.size}.\nPlan:\n${optimized.treeString}")
+      }
+    }
+  }
 }
