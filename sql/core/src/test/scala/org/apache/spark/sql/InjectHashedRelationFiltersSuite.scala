@@ -35,7 +35,8 @@ import org.apache.spark.sql.test.SharedSparkSession
  * REDs that prove the four scaffolded classes (rule + Subquery + Exec + Ref)
  * exist with their contracted signatures.
  */
-class InjectHashedRelationFiltersSuite extends SharedSparkSession {
+class InjectHashedRelationFiltersSuite extends SharedSparkSession
+  with org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper {
 
   test("InjectHashedRelationFilters rule object exists in catalyst.optimizer") {
     // P2a RED #1: the rule must be a registered Catalyst optimizer object.
@@ -406,6 +407,164 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
         assert(injected.nonEmpty,
           s"Expected HRC injection on composite int+string join (UnsafeRow fallback), " +
             s"but found none.\nPlan:\n${optimized.treeString}")
+      }
+    }
+  }
+
+  test("Composite int+int correctness vs HRC off (P2c-1 B.3 + B.6 RED #15)") {
+    // P2c-1 B.3 (correctness packed-Long, >=1k rows + collision-prone keys) +
+    // B.6 (HRC actually filters; not BHJ-救回 invisible bug, per stage2-r10 F2.1).
+    // Build = 16 keys, probe = 4000 rows where only ~25% have a matching build
+    // key under the COMPOSITE (k1, k2) tuple. Compare HRC on vs off; if the
+    // composite probe-key shape is bit-misaligned, packed-Long lookup misses
+    // and BHJ救回 still yields the right answer -- so we also assert HRC node
+    // is present in the executed plan (proof HRC participated).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      withTempView("b15", "p15") {
+        // Build: 16 composite keys (k1=0..3, k2=0..3 cartesian).
+        spark.range(16).selectExpr(
+          "cast(id % 4 as int) as k1",
+          "cast(id / 4 as int) as k2",
+          "id as v").createOrReplaceTempView("b15")
+        // Probe: 10_000 rows; collision-prone (small int domain forces shared
+        // hash buckets) + ~25% genuine matches under (k1, k2) AND semantics.
+        // Must be > 5000-byte threshold so probe is NOT broadcastable
+        // (otherwise InjectHashedRelationFilters early-returns).
+        spark.range(10000).selectExpr(
+          "cast(id % 16 as int) as k1",
+          "cast(id % 8 as int) as k2",
+          "id as v").createOrReplaceTempView("p15")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(b15) */ p15.v FROM p15 JOIN b15 ON " +
+            "p15.k1 = b15.k1 AND p15.k2 = b15.k2"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val withHrc = spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        assert(withHrc == baseline,
+          s"Composite int+int HRC on must equal HRC off.\n" +
+            s"  baseline size=${baseline.size}, withHrc size=${withHrc.size}\n" +
+            s"  baseline-withHrc=${(baseline -- withHrc).take(10)}\n" +
+            s"  withHrc-baseline=${(withHrc -- baseline).take(10)}")
+        // B.6 anchor: HRC node MUST be present in the executed plan (proves
+        // the filter participated; without this, a bit-misalignment in the
+        // packed-Long lookup would silent-miss and BHJ救回 still pass checkAnswer).
+        // Materialize first so AQE finalizes (HRCExec lives in final plan, not
+        // the pre-AQE SubqueryAdaptiveHRCExec placeholder).
+        val df = spark.sql(sqlStr)
+        df.collect()
+        val hrcExecs = collectWithSubqueries(df.queryExecution.executedPlan) {
+          case sp => sp.expressions.flatMap(_.collect {
+            case e: HashedRelationContainsExec => e
+          })
+        }.flatten
+        assert(hrcExecs.nonEmpty,
+          s"Expected HashedRelationContainsExec in executed plan (proves HRC " +
+            s"participated; without this, BHJ救回 could mask a bit-misalignment " +
+            s"bug).\nPlan:\n${df.queryExecution.executedPlan.treeString}")
+      }
+    }
+  }
+
+  test("Composite int+string correctness via UnsafeRow fallback (P2c-1 B.4 RED #16)") {
+    // P2c-1 B.4 (correctness UnsafeRow fallback path, >=1k rows). String key
+    // forces canRewriteAsLongType=false; rewriteKeyExpr returns the original
+    // Seq; doGenCode emits GenerateUnsafeProjection.createCode and
+    // HashedRelation.getValue(InternalRow) byte-compares against the build-
+    // side UnsafeRow packing. Any schema/dataType mismatch yields 100% miss.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      withTempView("b16", "p16") {
+        spark.range(16).selectExpr(
+          "cast(id % 4 as int) as k1",
+          "cast(id / 4 as string) as k2",
+          "id as v").createOrReplaceTempView("b16")
+        spark.range(10000).selectExpr(
+          "cast(id % 16 as int) as k1",
+          "cast(id % 8 as string) as k2",
+          "id as v").createOrReplaceTempView("p16")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(b16) */ p16.v FROM p16 JOIN b16 ON " +
+            "p16.k1 = b16.k1 AND p16.k2 = b16.k2"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val withHrc = spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        assert(withHrc == baseline,
+          s"UnsafeRow fallback HRC on must equal HRC off.\n" +
+            s"  baseline size=${baseline.size}, withHrc size=${withHrc.size}\n" +
+            s"  baseline-withHrc=${(baseline -- withHrc).take(10)}\n" +
+            s"  withHrc-baseline=${(withHrc -- baseline).take(10)}")
+        val df = spark.sql(sqlStr)
+        df.collect()
+        val hrcExecs = collectWithSubqueries(df.queryExecution.executedPlan) {
+          case sp => sp.expressions.flatMap(_.collect {
+            case e: HashedRelationContainsExec => e
+          })
+        }.flatten
+        assert(hrcExecs.nonEmpty,
+          s"Expected HashedRelationContainsExec on UnsafeRow fallback path.\n" +
+            s"Plan:\n${df.queryExecution.executedPlan.treeString}")
+      }
+    }
+  }
+
+  test("Swapped-key composite ON-clause yields same answer (P2c-1 B.7 RED #17)") {
+    // P2c-1 B.7 (per stage2-r10 F3.1): probe (k1=y AND k2=w) and (k2=w AND
+    // k1=y) must produce identical row sets, AND both must equal the HRC-off
+    // baseline. Sentinel for broadcastKeyIndices vs probe-key zipped order.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      withTempView("b17", "p17") {
+        spark.range(16).selectExpr(
+          "cast(id % 4 as int) as k1",
+          "cast(id / 4 as int) as k2",
+          "id as v").createOrReplaceTempView("b17")
+        spark.range(10000).selectExpr(
+          "cast(id % 16 as int) as k1",
+          "cast(id % 8 as int) as k2",
+          "id as v").createOrReplaceTempView("p17")
+        val orderA =
+          "SELECT /*+ BROADCAST(b17) */ p17.v FROM p17 JOIN b17 ON " +
+            "p17.k1 = b17.k1 AND p17.k2 = b17.k2"
+        val orderB =
+          "SELECT /*+ BROADCAST(b17) */ p17.v FROM p17 JOIN b17 ON " +
+            "p17.k2 = b17.k2 AND p17.k1 = b17.k1"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(orderA).collect().map(_.getLong(0)).toSet
+        }
+        val dfA = spark.sql(orderA)
+        val dfB = spark.sql(orderB)
+        val withHrcA = dfA.collect().map(_.getLong(0)).toSet
+        val withHrcB = dfB.collect().map(_.getLong(0)).toSet
+        assert(withHrcA == baseline && withHrcB == baseline,
+          s"Swapped composite key order must yield same answer as HRC off.\n" +
+            s"  baseline=${baseline.size}, A=${withHrcA.size}, B=${withHrcB.size}")
+        // Anchor: HRC node MUST be present on both orderings (proves the
+        // swapped-key ON-clause both hit composite HRC inject, not just
+        // false-green via 0-inject identical baseline).
+        val hrcA = collectWithSubqueries(dfA.queryExecution.executedPlan) {
+          case sp => sp.expressions.flatMap(_.collect {
+            case e: HashedRelationContainsExec => e
+          })
+        }.flatten
+        val hrcB = collectWithSubqueries(dfB.queryExecution.executedPlan) {
+          case sp => sp.expressions.flatMap(_.collect {
+            case e: HashedRelationContainsExec => e
+          })
+        }.flatten
+        assert(hrcA.nonEmpty && hrcB.nonEmpty,
+          s"Expected HRCExec on both orderings (A=${hrcA.size}, B=${hrcB.size})")
       }
     }
   }
