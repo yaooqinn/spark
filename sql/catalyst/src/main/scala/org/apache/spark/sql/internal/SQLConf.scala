@@ -821,9 +821,13 @@ object SQLConf {
 
   val RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION =
     buildConf("spark.sql.optimizer.runtime.hashedRelationContains.costModel.bloomMutualExclusion")
-      .doc("When true and both the HashedRelationContains rule and the Bloom-filter rule " +
-        "select the same (scan, joinKey) pair, prefer HashedRelationContains if the " +
-        "broadcast build size is within maxBuildSize, otherwise fall back to Bloom.")
+      .doc("When true, the HashedRelationContains (HRC) inject rule skips its " +
+        "own injection on probe sites where a runtime Bloom filter has already " +
+        "been injected on overlapping scan lineage, to avoid two runtime filters " +
+        "doing redundant work over the same broadcast. Setting this to false " +
+        "lets HRC and the Bloom filter coexist on the same site. A cost-based " +
+        "variant that prefers HRC when the broadcast build size is small enough " +
+        "is a planned follow-up.")
       .version("5.0.0")
       .booleanConf
       .createWithDefault(true)

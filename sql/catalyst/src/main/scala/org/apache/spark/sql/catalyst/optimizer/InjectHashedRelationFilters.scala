@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import org.apache.spark.sql.catalyst.expressions.{Expression, HashedRelationContainsSubquery, PredicateHelper}
+import org.apache.spark.sql.catalyst.expressions.{BloomFilterMightContain, Expression, HashedRelationContainsSubquery, PredicateHelper}
 import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, Join, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -41,6 +41,43 @@ import org.apache.spark.sql.catalyst.trees.TreePattern.JOIN
  */
 object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelper
   with JoinSelectionHelper {
+
+  /**
+   * P2c-2 mutex helper (testability per todos 0010-investigation; visibility
+   * private[sql] for HelperUnit tests in package org.apache.spark.sql).
+   *
+   * Returns true iff the probe plan already carries a Bloom-filter probe
+   * (BloomFilterMightContain) whose key lineage overlaps any of the HRC
+   * probe keys, per 0009 rev4 section 3.1:
+   *   - per-key independent walk (any-match defer if at least one HRC key
+   *     shares lineage with the Bloom key)
+   *   - ExprId-strict equality (Alias rename breaks lineage match, F6.2)
+   *   - lineage = AttributeReference set of the Bloom key's XxHash64 args,
+   *     intersected with HRC key's own attribute set
+   *
+   * Conf gate: when RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION
+   * is false, short-circuit to false (mutex axis disabled, coexist mode).
+   */
+  private[sql] def hasBloomOnSameScanLineage(
+      probePlan: LogicalPlan,
+      hrcProbeKeys: Seq[Expression]): Boolean = {
+    if (!conf.runtimeFilterHashedRelationContainsBloomMutualExclusion) {
+      return false
+    }
+    val bloomKeyAttrSets: Seq[Set[Long]] = probePlan.collect {
+      case Filter(cond, _) => cond.collect {
+        case bf: BloomFilterMightContain =>
+          // bf.right is XxHash64(Seq(key)); its .references is the attr set.
+          bf.right.references.map(_.exprId.id).toSet
+      }
+    }.flatten
+    if (bloomKeyAttrSets.isEmpty) return false
+    // Per-key independent walk + any-match.
+    hrcProbeKeys.exists { hrcKey =>
+      val hrcAttrIds = hrcKey.references.map(_.exprId.id).toSet
+      bloomKeyAttrSets.exists(bloomIds => bloomIds.intersect(hrcAttrIds).nonEmpty)
+    }
+  }
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
     if (!conf.runtimeFilterHashedRelationContainsEnabled) {
@@ -73,6 +110,13 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildIsRight: Boolean): LogicalPlan = {
     if (!canBroadcastBySize(buildPlan, conf)) return join
     if (canBroadcastBySize(probePlan, conf)) return join
+    // P2c-2: Bloom mutex defer. If the probe side already carries a Bloom
+    // filter on the same scan lineage as any HRC probe key, skip HRC inject
+    // to avoid double-redundant runtime work. See hasBloomOnSameScanLineage
+    // for spec (0009 rev4 section 3.1) and SQLConf-gated coexist override.
+    if (hasBloomOnSameScanLineage(probePlan, probeKeys)) {
+      return join
+    }
     // Avoid re-injecting on a probe plan that already contains the same HRC subquery
     // for this build-key set (idempotence under FixedPoint(1) re-trigger).
     if (probePlan.exists {
