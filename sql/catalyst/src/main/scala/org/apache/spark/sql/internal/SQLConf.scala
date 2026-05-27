@@ -825,9 +825,7 @@ object SQLConf {
         "own injection on probe sites where a runtime Bloom filter has already " +
         "been injected on overlapping scan lineage, to avoid two runtime filters " +
         "doing redundant work over the same broadcast. Setting this to false " +
-        "lets HRC and the Bloom filter coexist on the same site. A cost-based " +
-        "variant that prefers HRC when the broadcast build size is small enough " +
-        "is a planned follow-up.")
+        "lets HRC and the Bloom filter coexist on the same site.")
       .version("5.0.0")
       .booleanConf
       .createWithDefault(true)

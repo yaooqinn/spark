@@ -43,20 +43,14 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
   with JoinSelectionHelper {
 
   /**
-   * P2c-2 mutex helper (testability per todos 0010-investigation; visibility
-   * private[sql] for HelperUnit tests in package org.apache.spark.sql).
-   *
    * Returns true iff the probe plan already carries a Bloom-filter probe
-   * (BloomFilterMightContain) whose key lineage overlaps any of the HRC
-   * probe keys, per 0009 rev4 section 3.1:
-   *   - per-key independent walk (any-match defer if at least one HRC key
-   *     shares lineage with the Bloom key)
-   *   - ExprId-strict equality (Alias rename breaks lineage match, F6.2)
-   *   - lineage = AttributeReference set of the Bloom key's XxHash64 args,
-   *     intersected with HRC key's own attribute set
+   * (`BloomFilterMightContain`) whose key lineage overlaps any of the HRC
+   * probe keys. Lineage match uses `ExprId`-strict equality, so an `Alias`
+   * rename between scan and probe intentionally breaks the match.
    *
-   * Conf gate: when RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION
-   * is false, short-circuit to false (mutex axis disabled, coexist mode).
+   * Gated by `RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION`;
+   * when the conf is `false`, returns `false` and the two runtime filters
+   * coexist on the same probe site.
    */
   private[sql] def hasBloomOnSameScanLineage(
       probePlan: LogicalPlan,
@@ -72,7 +66,6 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       }
     }.flatten
     if (bloomKeyAttrSets.isEmpty) return false
-    // Per-key independent walk + any-match.
     hrcProbeKeys.exists { hrcKey =>
       val hrcAttrIds = hrcKey.references.map(_.exprId.id).toSet
       bloomKeyAttrSets.exists(bloomIds => bloomIds.intersect(hrcAttrIds).nonEmpty)
@@ -110,10 +103,10 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildIsRight: Boolean): LogicalPlan = {
     if (!canBroadcastBySize(buildPlan, conf)) return join
     if (canBroadcastBySize(probePlan, conf)) return join
-    // P2c-2: Bloom mutex defer. If the probe side already carries a Bloom
-    // filter on the same scan lineage as any HRC probe key, skip HRC inject
-    // to avoid double-redundant runtime work. See hasBloomOnSameScanLineage
-    // for spec (0009 rev4 section 3.1) and SQLConf-gated coexist override.
+    // Skip HRC inject when the probe side already carries a Bloom filter on
+    // overlapping scan lineage; gated by the SQLConf above. The Bloom probe
+    // already covers the same membership check, and stacking both runtime
+    // filters on the same broadcast pays redundant per-row cost.
     if (hasBloomOnSameScanLineage(probePlan, probeKeys)) {
       return join
     }

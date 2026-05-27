@@ -572,39 +572,24 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   }
 
   // ===========================================================================
-  // P2c-2 (Bloom mutual-exclusion) RED batch — Gate B rev2 per plan rev13
-  //
-  // HelperUnit pattern (per todos 0010-investigation-p2c-2-testability.md
-  // 方案 A + guidelines/doc-layering.md TDD 铁律 #7): build in-memory
-  // LogicalPlan and call `InjectHashedRelationFilters.hasBloomOnSameScanLineage`
-  // directly. End-to-end RED is infeasible because Spark `InjectRuntimeFilter`
-  // heuristic rejects Bloom inject in 3-table BHJ-on-top shape (mutex test
-  // 天然 shape), so the helper is exposed as `private[catalyst]` and tested in
-  // isolation. Real mutex behavior verified via B.9 q24a N>=3 spike (HARD).
+  // Unit tests for `InjectHashedRelationFilters.hasBloomOnSameScanLineage`.
+  // End-to-end coverage is constrained by `InjectRuntimeFilter`'s heuristic,
+  // which declines Bloom injection in the BHJ-on-top shape that would also
+  // trigger HRC injection, so we exercise the helper in isolation on small
+  // hand-built `LogicalPlan`s. The `RUNTIME_BLOOM_FILTER_ENABLED=false` cases
+  // are end-to-end baseline checks that HRC still injects when Bloom is off.
   // ===========================================================================
 
-  /** Build a BloomFilterMightContain over `key` with a placeholder binary
-   * scalar (real Bloom inject uses BloomFilterAggregate subquery; for helper
-   * tests we only need the spec: BloomFilterMightContain with
-   * right=XxHash64(Seq(key)). Helper inspects `bf.right.references`. */
+  /** Build a `BloomFilterMightContain` over `key` using a placeholder binary
+   * scalar. The helper only inspects `bf.right.references`; the bloom binary
+   * is irrelevant. */
   private def bloomMightContain(key: Attribute): BloomFilterMightContain =
     BloomFilterMightContain(
       Literal(null, BinaryType),
       new XxHash64(Seq(key)))
 
-  test("P2c-2 B.1 RED #19 HelperUnit-1: defer on same-lineage Bloom (single key)") {
-    // P2c-2 B.1 RED #19 (plan rev13 Gate B rev2 + 0009 rev4 §3.1).
-    //
-    // probePlan:
-    //   Filter( BloomFilterMightContain(_, XxHash64(c1)),  <-- Bloom on scan_X.c1
-    //           LocalRelation(c1, c2) )                    <-- scan_X leaf
-    //
-    // Call hasBloomOnSameScanLineage(probePlan, Seq(c1)). HRC probe key c1
-    // shares scan_X lineage with the Bloom -> helper must return true.
-    //
-    // RED expectation: helper does not exist on prod yet -> compile fail
-    // (TDD bedrock #4: RED guards prod entry, not stdlib). After B.10 GREEN
-    // (helper land), this assertion passes.
+  test("hasBloomOnSameScanLineage defers when Bloom shares scan lineage " +
+    "(single key)") {
     val c1 = AttributeReference("c1", IntegerType)()
     val c2 = AttributeReference("c2", IntegerType)()
     val scanX = LocalRelation(c1, c2)
@@ -612,22 +597,12 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
 
     assert(
       InjectHashedRelationFilters.hasBloomOnSameScanLineage(probePlan, Seq(c1)),
-      "HelperUnit-1: Bloom on c1 + HRC key c1 share scan_X lineage -> defer")
+      "Bloom on c1 and HRC probe key c1 share the same scan lineage; " +
+        "helper must defer HRC inject")
   }
 
-  test("P2c-2 B.2 RED #20 HelperUnit-2: no defer when Bloom on unrelated scan (F6.1)") {
-    // P2c-2 B.2 RED #20 (plan rev13 Gate B rev2 + 0009 rev4 §3.1 F6.1 anti-regression).
-    //
-    // probePlan:
-    //   Filter( BloomFilterMightContain(_, XxHash64(y1)),  <-- Bloom on scan_Y.y1
-    //           Join( LocalRelation(x1, x2),               <-- scan_X leaf
-    //                 LocalRelation(y1, y2),               <-- scan_Y leaf
-    //                 Inner, x1 === y1 ) )
-    //
-    // Call hasBloomOnSameScanLineage(probePlan, Seq(x1)). HRC probe key x1
-    // belongs to scan_X lineage; Bloom belongs to scan_Y lineage. Helper
-    // must return false -> HRC inject is NOT mutex-blocked (orthogonal sides
-    // ok per 0009 rev4 §3.1).
+  test("hasBloomOnSameScanLineage does not defer when Bloom is on an " +
+    "unrelated scan") {
     val x1 = AttributeReference("x1", IntegerType)()
     val x2 = AttributeReference("x2", IntegerType)()
     val y1 = AttributeReference("y1", IntegerType)()
@@ -639,22 +614,12 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
 
     assert(
       !InjectHashedRelationFilters.hasBloomOnSameScanLineage(probePlan, Seq(x1)),
-      "HelperUnit-2: Bloom on scan_Y.y1 + HRC key scan_X.x1 unrelated -> no defer (F6.1)")
+      "Bloom on scan_Y and HRC probe key on scan_X are unrelated; " +
+        "helper must not defer HRC inject")
   }
 
-  test("P2c-2 B.3 RED #21 HelperUnit-3: no defer when Bloom on aliased projection (F6.2)") {
-    // P2c-2 B.3 RED #21 (plan rev13 Gate B rev2 + 0009 rev4 §3.1 F6.2 anti-regression).
-    //
-    // probePlan:
-    //   Filter( BloomFilterMightContain(_, XxHash64(renamed)),  <-- Bloom on Alias output
-    //           Project( Alias(c1, "renamed")::Nil,             <-- Alias rewrite
-    //                    LocalRelation(c1, c2) ) )              <-- scan_X leaf
-    //
-    // Call hasBloomOnSameScanLineage(probePlan, Seq(c1)). HRC probe key is
-    // the original c1 (ExprId E1). Bloom key is the Alias output (ExprId E2,
-    // != E1). Per 0009 rev4 §3.1 ExprId equality is strict: Alias rename
-    // breaks lineage match -> helper must return false (HRC inject NOT
-    // mutex-blocked despite physical same-scan, F6.2 false-positive guard).
+  test("hasBloomOnSameScanLineage respects ExprId strictness across " +
+    "Alias rename") {
     val c1 = AttributeReference("c1", IntegerType)()
     val c2 = AttributeReference("c2", IntegerType)()
     val scanX = LocalRelation(c1, c2)
@@ -664,20 +629,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
 
     assert(
       !InjectHashedRelationFilters.hasBloomOnSameScanLineage(probePlan, Seq(c1)),
-      "HelperUnit-3: Bloom on Alias(c1).toAttribute + HRC key c1 -> no defer (F6.2 ExprId mismatch)")
+      "Bloom key is the Alias output (fresh ExprId), HRC key is the original " +
+        "attribute; ExprId-strict equality must not consider them the same lineage")
   }
 
-  test("P2c-2 B.4 RED #22 HelperUnit-4: composite HRC keys any-match defer") {
-    // P2c-2 B.4 RED #22 (plan rev13 Gate B rev2 + 0009 rev4 §3.1 any-match).
-    //
-    // probePlan:
-    //   Filter( BloomFilterMightContain(_, XxHash64(c1)),  <-- Bloom on scan_X.c1
-    //           LocalRelation(c1, c2) )                    <-- scan_X leaf
-    //
-    // Call hasBloomOnSameScanLineage(probePlan, Seq(c1, c2)). HRC has TWO
-    // probe keys (composite). Per 0009 rev4 §3.1 per-key independent walk +
-    // any-match: at least one HRC key (c1) shares lineage with Bloom ->
-    // helper must return true (defer entire composite HRC, not partial).
+  test("hasBloomOnSameScanLineage any-matches across composite HRC keys") {
     val c1 = AttributeReference("c1", IntegerType)()
     val c2 = AttributeReference("c2", IntegerType)()
     val scanX = LocalRelation(c1, c2)
@@ -685,15 +641,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
 
     assert(
       InjectHashedRelationFilters.hasBloomOnSameScanLineage(probePlan, Seq(c1, c2)),
-      "HelperUnit-4: composite HRC keys (c1, c2), Bloom on c1 -> any-match defer")
+      "Composite HRC keys (c1, c2) with Bloom on c1; any-match must defer")
   }
 
-  test("P2c-2 B.5 Sentinel-1: Bloom-off single-key HRC still injects (anti-regression)") {
-    // P2c-2 B.5 Sentinel-1 (plan rev13 + 0010 §4 retain). End-to-end anchor:
-    // with RUNTIME_BLOOM_FILTER_ENABLED=false, mutex axis is no-op and HRC
-    // single-key inject must continue per P2a-4 baseline. Sentinel guards
-    // B.10 mutex GREEN against over-blocking. Must pass on current HEAD AND
-    // stay green after B.10 lands.
+  test("HRC still injects when Bloom filter is disabled (single key)") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
@@ -710,16 +661,13 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
             .isDefined => f
         }
         assert(injected.nonEmpty,
-          s"Sentinel-1: Bloom-off single-key HRC must inject (anti over-block).\n" +
+          s"With Bloom disabled, the single-key HRC inject must still happen.\n" +
             s"Plan:\n${optimized.treeString}")
       }
     }
   }
 
-  test("P2c-2 B.6 Sentinel-2: Bloom-off composite HRC still injects (anti-regression)") {
-    // P2c-2 B.6 Sentinel-2 (plan rev13 + 0010 §4 retain). Composite int+int
-    // (packed-Long path per P2c-1) with Bloom off. Mutex no-op; HRC must
-    // inject. Guards B.10 GREEN against composite over-block regression.
+  test("HRC still injects when Bloom filter is disabled (composite key)") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
@@ -738,19 +686,14 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
             .isDefined => f
         }
         assert(injected.nonEmpty,
-          s"Sentinel-2: Bloom-off composite HRC must inject (anti over-block).\n" +
+          s"With Bloom disabled, the composite-key HRC inject must still happen.\n" +
             s"Plan:\n${optimized.treeString}")
       }
     }
   }
 
-  test("P2c-2 B.7 SQLConf RED #23: bloomMutualExclusion=false short-circuits helper to false") {
-    // P2c-2 B.7 RED #23 (plan rev13 + 0009 rev4 §3.1 + existing SQLConf
-    // RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION default=true).
-    // Same B.1 shape (Bloom on c1 + HRC key c1 same-lineage) but with conf
-    // flipped off -> helper must short-circuit return false (mutex axis
-    // disabled, HRC inject proceeds, coexist mode). Sentinel against
-    // hard-coded mutex behavior ignoring conf.
+  test("hasBloomOnSameScanLineage short-circuits when mutual-exclusion " +
+    "conf is false") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION.key -> "false") {
       val c1 = AttributeReference("c1", IntegerType)()
@@ -760,7 +703,8 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
 
       assert(
         !InjectHashedRelationFilters.hasBloomOnSameScanLineage(probePlan, Seq(c1)),
-        "B.7 SQLConf: bloomMutualExclusion=false -> helper short-circuits to false")
+        "With the mutual-exclusion conf off, the helper must return false " +
+          "regardless of plan shape")
     }
   }
 }
