@@ -77,17 +77,28 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       return plan
     }
     plan.transformWithPruning(_.containsPattern(JOIN)) {
-      case j @ ExtractEquiJoinKeys(_, leftKeys, rightKeys, _, _, left, right, hint)
+      case j @ ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, left, right, hint)
           if leftKeys.size == rightKeys.size && leftKeys.nonEmpty =>
+        // joinType gate (peer-parity with InjectRuntimeFilter L140/L159): only
+        // inject on a probe side that is correctness-safe to prune. canPruneLeft
+        // / canPruneRight from JoinSelectionHelper return false for joinTypes
+        // where dropping rows on the corresponding side would change the answer
+        // (e.g. LeftAnti, FullOuter, ExistenceJoin, NullAwareAntiJoin). Without
+        // this gate the HRC predicate "key IN broadcast" silently drops rows
+        // that LeftAnti is supposed to keep -- see P2c-3 C.7 RED for the
+        // silently-wrong P0 evidence.
         // Try the right side as build (probe filter applied on the left).
-        val withLeftProbe =
+        val withLeftProbe = if (canPruneLeft(joinType)) {
           maybeInjectProbe(j, leftKeys, rightKeys, left, right, buildIsRight = true)
+        } else {
+          j
+        }
         // Then try the left side as build (probe filter applied on the right) on the
         // possibly-rewritten join. We re-extract because the join structure may have
         // changed if the first inject site succeeded.
         withLeftProbe match {
-          case j2 @ ExtractEquiJoinKeys(_, lk2, rk2, _, _, l2, r2, _)
-              if lk2.size == rk2.size && lk2.nonEmpty =>
+          case j2 @ ExtractEquiJoinKeys(jt2, lk2, rk2, _, _, l2, r2, _)
+              if lk2.size == rk2.size && lk2.nonEmpty && canPruneRight(jt2) =>
             maybeInjectProbe(j2, rk2, lk2, r2, l2, buildIsRight = false)
           case other => other
         }

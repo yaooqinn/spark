@@ -940,4 +940,81 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC must not inject on LeftAnti join (P2c-3 C.7 SPIP joinType gate, silent P0)") {
+    // P2c-3 §3 joinType gate bug, C.7 silent-P0 severity. The HRC predicate
+    // is "probeKey IS IN broadcast(buildKeys)", which is the EXACT INVERSE
+    // of LeftAnti semantics ("keep left rows where NO match on right"). If
+    // HRC injects on the LeftAnti probe today, it pre-filters out exactly
+    // the rows that LeftAnti is meant to KEEP, silently producing a wrong
+    // answer (typically 0 rows where the correct answer has many).
+    //
+    // RED-on-HEAD: HEAD (worktree d20a752472f) lacks a joinType gate, so
+    // ExtractEquiJoinKeys wildcard-matches LeftAnti and the rule injects;
+    // checkAnswer parity (HRC on vs off) must FAIL today. GREEN after §3
+    // prod diff (canPruneLeft/Right gate landed in InjectHashedRelationFilters
+    // L82-88), peer-parity with InjectRuntimeFilter L140/L159.
+    //
+    // Peer ground: InjectRuntimeFilter.scala uses canPruneLeft / canPruneRight
+    // from JoinSelectionHelper; LeftAnti -> case _ => false in both, blocking
+    // injection.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        // build keys 0..4 (broadcastable, ~40 bytes). probe rows 0..49999
+        // (much larger than 5000-byte threshold so canBroadcastBySize(probe)
+        // is false; the C.5 early-return at maybeInjectProbe:L105 cannot
+        // mask the LeftAnti silent-P0 bug here).
+        // LeftAnti(probe, build) on probe.k=build.k keeps probe rows where
+        // probe.k NOT IN {0..4} -> rows 5..49999 (49995 rows). If HRC
+        // injects, it pre-filters probe to {0..4} (rows in build), and
+        // LeftAnti on that returns 0 rows -> silently wrong.
+        spark.range(5).toDF("k").createOrReplaceTempView("build")
+        spark.range(50000).toDF("k").createOrReplaceTempView("probe")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(build) */ probe.k FROM probe " +
+            "LEFT ANTI JOIN build ON probe.k = build.k"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val withHrc = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        // Diagnostic + anti-regression: confirm HRC did NOT inject on the
+        // LeftAnti probe (joinType gate working). Before §3 fix this was 1,
+        // which silently filtered out the 49995 ANTI-kept rows.
+        val dfDiag = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr)
+        }
+        val optimized = dfDiag.queryExecution.optimizedPlan
+        val injectedFilters = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        // Sanity on baseline: must be the 49995-row complement, not 0/50000.
+        assert(baseline.size == 49995,
+          s"Baseline (HRC off) LeftAnti must keep 49995 rows " +
+            s"(probe NOT IN build), got ${baseline.size}. Test fixture is wrong.")
+        // Anti-regression: HRC must not inject on a LeftAnti probe. If this
+        // count is non-zero on a future change, P2c-3 C.7 regressed.
+        assert(injectedFilters.isEmpty,
+          s"HRC must not inject on LeftAnti probe (joinType gate blocks it), " +
+            s"but found ${injectedFilters.size} inject(s).\nPlan:\n" +
+            s"${optimized.treeString}")
+        assert(withHrc == baseline,
+          s"HRC on LeftAnti must match HRC off (joinType gate must block " +
+            s"injection on LeftAnti probe).\n" +
+            s"  baseline (HRC off, size=${baseline.size}): " +
+            s"${baseline.toSeq.sorted.take(20)}...\n" +
+            s"  withHrc  (HRC on,  size=${withHrc.size}):  " +
+            s"${withHrc.toSeq.sorted.take(20)}...")
+      }
+    }
+  }
 }
