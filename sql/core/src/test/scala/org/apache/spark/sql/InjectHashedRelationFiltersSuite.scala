@@ -351,4 +351,62 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession {
       }
     }
   }
+
+  test("Composite int+int join injects HRC (P2c-1 B.1 RED #13)") {
+    // P2c-1 B.1 RED #13: composite (size > 1) equi-join with packed-Long path
+    // (two IntegralType keys, sum <= 8B). Currently `size == 1` guard at
+    // InjectHashedRelationFilters.scala L51 short-circuits; expect FAIL until
+    // P2c-1 GREEN lifts the guard.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      withTempView("build2", "probe2") {
+        spark.range(8).selectExpr("cast(id as int) as k1", "cast(id as int) as k2")
+          .createOrReplaceTempView("build2")
+        spark.range(10000).selectExpr("cast(id as int) as k1", "cast(id as int) as k2")
+          .createOrReplaceTempView("probe2")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build2) */ probe2.k1 FROM probe2 JOIN build2 ON " +
+            "probe2.k1 = build2.k1 AND probe2.k2 = build2.k2")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.nonEmpty,
+          s"Expected HRC injection on composite int+int join (packed-Long path), " +
+            s"but found none.\nPlan:\n${optimized.treeString}")
+      }
+    }
+  }
+
+  test("Composite int+string join injects HRC via UnsafeRow fallback (P2c-1 B.2 RED #14)") {
+    // P2c-1 B.2 RED #14: composite equi-join falling out of packed-Long path
+    // (string forces UnsafeRow fallback per HashJoin.rewriteKeyExpr L743-747
+    // canRewriteAsLongType check: not all IntegralType). Currently `size == 1`
+    // guard rejects; expect FAIL until P2c-1 GREEN.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      withTempView("build3", "probe3") {
+        spark.range(8).selectExpr("cast(id as int) as k1", "cast(id as string) as k2")
+          .createOrReplaceTempView("build3")
+        spark.range(10000).selectExpr("cast(id as int) as k1", "cast(id as string) as k2")
+          .createOrReplaceTempView("probe3")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(build3) */ probe3.k1 FROM probe3 JOIN build3 ON " +
+            "probe3.k1 = build3.k1 AND probe3.k2 = build3.k2")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.nonEmpty,
+          s"Expected HRC injection on composite int+string join (UnsafeRow fallback), " +
+            s"but found none.\nPlan:\n${optimized.treeString}")
+      }
+    }
+  }
 }

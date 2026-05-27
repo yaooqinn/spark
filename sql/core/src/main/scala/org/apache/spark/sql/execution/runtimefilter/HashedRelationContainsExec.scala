@@ -20,10 +20,9 @@ package org.apache.spark.sql.execution.runtimefilter
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression, Predicate}
-import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode, FalseLiteral, JavaCode, TrueLiteral}
+import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression, Predicate, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode, FalseLiteral, GenerateUnsafeProjection, JavaCode, TrueLiteral}
 import org.apache.spark.sql.catalyst.expressions.codegen.Block.BlockHelper
-import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.execution.{BaseSubqueryExec, ExecSubqueryExpression, ReusedSubqueryExec}
 import org.apache.spark.sql.execution.joins.HashedRelation
 import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
@@ -39,45 +38,50 @@ import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
  * plan.executeBroadcast returns the same Broadcast[HashedRelation] handle
  * that the join will probe -- zero second materialization.
  *
- * Field design (driven by docs/0004-investigation-peer-audit-pass.md):
- *  - plan: BaseSubqueryExec  -- loosened from BroadcastedHashedRelationRef to
- *      admit ReusedSubqueryExec wrap (ReuseExchangeAndSubquery line 67 calls
- *      sub.withNewPlan with a BaseSubqueryExec; could be the original ref or
- *      a ReusedSubqueryExec).
- *  - @transient var broadcast  -- populated in updateResult, captured into
- *      task closures, dereferenced on executors via .value. Catalyst nulls
- *      this in canonicalized for stable equality.
+ * Probe-key shape: `packedProbeKeys` is the output of HashJoin.rewriteKeyExpr
+ * applied to the logical probe-side keys. It collapses to a single LongType
+ * expression for the packed-Long fast path (sum of IntegralType key widths
+ * <= 8B), or stays as the original Seq for the UnsafeRow fallback path.
+ * The build side is packed via the SAME helper at the SAME call site in
+ * PlanHashedRelationContainsFilters / PlanAdaptiveHashedRelationContainsFilters
+ * so build/probe shapes are byte-for-byte aligned (matches BHJ's own
+ * build/probe use of rewriteKeyExpr at HashJoin.scala line 133 / 136).
  *
- * Codegen path (P2c-0, per decision rev9 D7): first-class doGenCode emits an
- * inline `relation.getValue(key) != null` lookup. The broadcast handle is
- * wired into the codegen context via ctx.addReferenceObj (mirrors BHJ
- * prepareBroadcast in BroadcastHashJoinExec.scala line 192-205) and the
- * HashedRelation is materialized as a mutable state via addMutableState
- * forceInline=true. The result-shape boilerplate mirrors
- * BloomFilterMightContain.doGenCode (line 106-121): single-expr boolean
- * predicate with null-safe guard on the probe key. The interpreted eval()
- * path is retained as a fallback (same pattern as BloomFilterMightContain).
+ * Codegen path mirrors BHJ.genStreamSideJoinKey (HashJoin.scala line 381-394):
+ *  - packed-Long path (length == 1, head.dataType == LongType): emit
+ *    `relation.getValue(longKey) != null` inline.
+ *  - UnsafeRow fallback (else): emit GenerateUnsafeProjection.createCode +
+ *    `relation.getValue(unsafeRow) != null`.
+ * The interpreted eval() path mirrors the same two-branch structure for the
+ * non-codegen fallback (whole-stage off, debug, certain operators).
  *
- * Composite-key probe path (UnsafeRow lookup, single-Long packing fallback)
- * lands in P2c-1 (docs/0007-investigation-p2c-1-composite-key-design.md).
- * The current codegen branch covers only the LongType packed-key path; the
- * eval() fallback at line 100-103 already handles InternalRow probe keys for
- * runtime correctness until P2c-1 extends doGenCode.
+ * See:
+ *  - features/spark-hashed-relation-contains/docs/0007-investigation-p2c-1-composite-key-design.md
+ *    (Open Q1 CLOSED rev 2: BHJ two-path grep verified)
+ *  - HashedRelation.scala trait line 43-72 (getValue(Long) + getValue(InternalRow) dual)
  */
 case class HashedRelationContainsExec(
-    packedProbeKey: Expression,
+    packedProbeKeys: Seq[Expression],
     plan: BaseSubqueryExec,
     exprId: ExprId,
     var broadcast: Broadcast[HashedRelation] = null)
   extends ExecSubqueryExpression
-  with UnaryLike[Expression]
   with Predicate {
 
-  override def child: Expression = packedProbeKey
+  override def children: Seq[Expression] = packedProbeKeys
 
   override def dataType: DataType = BooleanType
 
   override def nullable: Boolean = false
+
+  private lazy val isPackedLong: Boolean =
+    packedProbeKeys.length == 1 && packedProbeKeys.head.dataType == LongType
+
+  // Lazy UnsafeProjection for the eval()-side UnsafeRow fallback path. Codegen
+  // path uses GenerateUnsafeProjection.createCode (compiled into doGenCode body)
+  // and bypasses this projection entirely.
+  @transient private lazy val unsafeRowProjection: UnsafeProjection =
+    UnsafeProjection.create(packedProbeKeys)
 
   override def updateResult(): Unit = {
     // BaseSubqueryExec lacks doExecuteBroadcast; BroadcastedHashedRelationRef
@@ -100,52 +104,21 @@ case class HashedRelationContainsExec(
     copy(plan = plan)
 
   override def eval(input: InternalRow): Any = {
-    val key = packedProbeKey.eval(input)
-    if (key == null) {
-      // Null probe keys never join in inner / non-null-aware outer joins
-      // (BHJ filters them out), so HRC returns false to skip them too.
-      false
+    val relation = broadcast.value
+    if (isPackedLong) {
+      val key = packedProbeKeys.head.eval(input)
+      if (key == null) false else relation.get(key.asInstanceOf[Long]) != null
     } else {
-      val relation = broadcast.value
-      packedProbeKey.dataType match {
-        case LongType =>
-          relation.get(key.asInstanceOf[Long]) != null
-        case _ =>
-          // Fallback: key is an InternalRow (composite-key UnsafeRow packing
-          // per P2c). Single-key non-Long-packable keys also hit this branch.
-          relation.get(key.asInstanceOf[InternalRow]) != null
-      }
+      val unsafeRow = unsafeRowProjection(input)
+      if (unsafeRow.anyNull()) false else relation.get(unsafeRow) != null
     }
   }
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    // Codegen path for the LongType packed-key fast path (P2c-0). Composite
-    // UnsafeRow probe keys hit the interpreted eval() fallback above until
-    // P2c-1 extends this method. We deliberately collapse BHJ's
-    // keyIsUnique branching here because HRC only cares about existence:
-    // HashedRelation.getValue returns the first matched row (or null) which
-    // is equivalent to (get(key) != null) for contains semantics. See
-    // grep-verified contract in HashedRelation.scala line 43-72 trait + line
-    // 1005-1023 LongHashedRelation + line 231-264 UnsafeHashedRelation:
-    // every implementation returns null on no-match, single-row or first-of-
-    // many on hit. Skeleton mirrors BloomFilterMightContain.doGenCode
-    // line 106-121 (single-expr boolean predicate, null-safe).
     if (broadcast == null) {
       // Defensive: updateResult should have populated this before codegen.
       // Mirror BloomFilterMightContain behaviour on a null filter.
       return ev.copy(isNull = TrueLiteral, value = JavaCode.defaultLiteral(dataType))
-    }
-    if (packedProbeKey.dataType != LongType) {
-      // Composite UnsafeRow path lands in P2c-1; until then, emit a per-row
-      // call to this.eval(input) so generated Java still compiles and exercises
-      // the interpreted fallback at line 109-119. Mirrors the CodegenFallback
-      // pattern but scoped to the non-Long branch only.
-      val thisRef = ctx.addReferenceObj("hrc", this, classOf[Expression].getName)
-      val inputRow = ctx.INPUT_ROW
-      return ev.copy(code = code"""
-        boolean ${ev.isNull} = false;
-        boolean ${ev.value} = (Boolean) $thisRef.eval($inputRow);""",
-        isNull = FalseLiteral)
     }
     val broadcastRef = ctx.addReferenceObj("broadcast", broadcast,
       classOf[Broadcast[HashedRelation]].getName)
@@ -156,23 +129,43 @@ case class HashedRelationContainsExec(
            | $v = (($clsName) $broadcastRef.value()).asReadOnlyCopy();
          """.stripMargin,
       forceInline = true)
-    val keyEval = packedProbeKey.genCode(ctx)
-    ev.copy(code = code"""
-      ${keyEval.code}
-      boolean ${ev.isNull} = false;
-      boolean ${ev.value} = false;
-      if (!${keyEval.isNull}) {
-        ${ev.value} = $relationTerm.getValue(${keyEval.value}) != null;
-      }""",
-      isNull = FalseLiteral)
+    if (isPackedLong) {
+      // Packed-Long fast path. Mirrors BHJ genStreamSideJoinKey case
+      // streamedBoundKeys.length == 1 && head.dataType == LongType.
+      val keyEval = packedProbeKeys.head.genCode(ctx)
+      ev.copy(code = code"""
+        ${keyEval.code}
+        boolean ${ev.isNull} = false;
+        boolean ${ev.value} = false;
+        if (!${keyEval.isNull}) {
+          ${ev.value} = $relationTerm.getValue(${keyEval.value}) != null;
+        }""",
+        isNull = FalseLiteral)
+    } else {
+      // UnsafeRow fallback path. Mirrors BHJ else-branch which emits
+      // GenerateUnsafeProjection.createCode(streamedBoundKeys); the
+      // resulting UnsafeRow term is fed straight into
+      // HashedRelation.getValue(InternalRow) (UnsafeHashedRelation
+      // line 231-264 lookup via BytesToBytesMap).
+      val keyEv = GenerateUnsafeProjection.createCode(ctx, packedProbeKeys)
+      ev.copy(code = code"""
+        ${keyEv.code}
+        boolean ${ev.isNull} = false;
+        boolean ${ev.value} = false;
+        if (!${keyEv.value}.anyNull()) {
+          ${ev.value} = $relationTerm.getValue(${keyEv.value}) != null;
+        }""",
+        isNull = FalseLiteral)
+    }
   }
 
   override lazy val canonicalized: HashedRelationContainsExec = copy(
-    packedProbeKey = packedProbeKey.canonicalized,
+    packedProbeKeys = packedProbeKeys.map(_.canonicalized),
     plan = plan.canonicalized.asInstanceOf[BaseSubqueryExec],
     exprId = ExprId(0),
     broadcast = null)
 
-  override protected def withNewChildInternal(newChild: Expression): HashedRelationContainsExec =
-    copy(packedProbeKey = newChild)
+  override protected def withNewChildrenInternal(
+      newChildren: IndexedSeq[Expression]): HashedRelationContainsExec =
+    copy(packedProbeKeys = newChildren)
 }

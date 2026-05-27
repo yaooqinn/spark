@@ -54,17 +54,19 @@ case class PlanAdaptiveSubqueries(
         val subquery = SubqueryAdaptiveBroadcastExec(name, broadcastKeyIndices, onlyInBroadcast,
           buildPlan, buildKeys, subqueryMap(exprId.id))
         DynamicPruningExpression(InSubqueryExec(value, subquery, exprId))
-      case HashedRelationContainsSubquery(pruningKey, buildPlan, buildKeys,
+      case HashedRelationContainsSubquery(pruningKeys, buildPlan, buildKeys,
           broadcastKeyIndices, exprId, _) =>
         val name = s"hashedrelationcontains#${exprId.id}"
         val subquery = SubqueryAdaptiveHashedRelationContainsExec(
           name, buildKeys, broadcastKeyIndices, buildPlan, subqueryMap(exprId.id))
-        // Pack the probe key the same way the non-AQE rule does
-        // (PlanHashedRelationContainsFilters); composite-key packing lands in
-        // P2c, so single-key MVP per 0002c-contract.md section 1.
-        val packedProbeKey =
-          org.apache.spark.sql.execution.joins.HashJoin.rewriteKeyExpr(Seq(pruningKey)).head
-        HashedRelationContainsExec(packedProbeKey, subquery, exprId)
+        // Pack the probe keys the same way the non-AQE rule does
+        // (PlanHashedRelationContainsFilters) via the SAME HashJoin.rewriteKeyExpr
+        // SSOT (HashJoin.scala line 743-771). Composite-key + UnsafeRow
+        // fallback both fall out of this single call; see
+        // features/spark-hashed-relation-contains/docs/0007-investigation-p2c-1-composite-key-design.md.
+        val packedProbeKeys =
+          org.apache.spark.sql.execution.joins.HashJoin.rewriteKeyExpr(pruningKeys)
+        HashedRelationContainsExec(packedProbeKeys, subquery, exprId)
     }
   }
 }

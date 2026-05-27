@@ -55,7 +55,7 @@ case class PlanAdaptiveHashedRelationContainsFilters(
 
     plan.transformAllExpressions {
       case HashedRelationContainsExec(
-          packedProbeKey,
+          packedProbeKeys,
           SubqueryAdaptiveHashedRelationContainsExec(name, buildKeys, broadcastKeyIndices,
             _, adaptivePlan: AdaptiveSparkPlanExec),
           exprId,
@@ -82,7 +82,7 @@ case class PlanAdaptiveHashedRelationContainsFilters(
           exchange.setLogicalLink(adaptivePlan.executedPlan.logicalLink.get)
           val newAdaptivePlan = adaptivePlan.copy(inputPlan = exchange)
           val ref = BroadcastedHashedRelationRef(newAdaptivePlan)
-          HashedRelationContainsExec(packedProbeKey, ref, NamedExpression.newExprId)
+          HashedRelationContainsExec(packedProbeKeys, ref, NamedExpression.newExprId)
         } else {
           // No reusable sibling BHJ broadcast: drop the filter. BHJ runs
           // unchanged. We intentionally do NOT plan a second
