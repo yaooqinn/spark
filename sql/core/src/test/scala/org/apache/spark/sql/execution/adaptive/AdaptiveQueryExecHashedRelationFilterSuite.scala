@@ -177,4 +177,47 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
       }
     }
   }
+
+  test("Composite int+int join under AQE produces same answer (P2c-1 B.8 RED #18)") {
+    // P2c-1 B.8 (per stage2-r10 F2.2): composite-key HRC injection must work
+    // under AQE-on path (PlanAdaptiveSubqueries -> PlanAdaptiveHashedRelationContainsFilters).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {
+      withTempView("b18", "p18") {
+        spark.range(16).selectExpr(
+          "cast(id % 4 as int) as k1",
+          "cast(id / 4 as int) as k2",
+          "id as v").createOrReplaceTempView("b18")
+        spark.range(10000).selectExpr(
+          "cast(id % 16 as int) as k1",
+          "cast(id % 8 as int) as k2",
+          "id as v").createOrReplaceTempView("p18")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(b18) */ p18.v FROM p18 JOIN b18 ON " +
+            "p18.k1 = b18.k1 AND p18.k2 = b18.k2"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val df = spark.sql(sqlStr)
+        val withHrc = df.collect().map(_.getLong(0)).toSet
+        assert(withHrc == baseline,
+          s"Composite HRC under AQE must equal HRC off.\n" +
+            s"  baseline=${baseline.size}, withHrc=${withHrc.size}")
+        // Inspect AFTER materialization so AQE has finalized; HRCExec lives
+        // in the post-finalization plan, not the pre-AQE placeholder.
+        val hrcExecs = collectWithSubqueries(df.queryExecution.executedPlan) {
+          case sp => sp.expressions.flatMap(_.collect {
+            case e: HashedRelationContainsExec => e
+          })
+        }.flatten
+        assert(hrcExecs.nonEmpty,
+          s"Expected HRCExec under AQE composite-key path.\n" +
+            s"Plan:\n${df.queryExecution.executedPlan.treeString}")
+      }
+    }
+  }
 }
