@@ -48,17 +48,17 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
     }
     plan.transformWithPruning(_.containsPattern(JOIN)) {
       case j @ ExtractEquiJoinKeys(_, leftKeys, rightKeys, _, _, left, right, hint)
-          if leftKeys.size == 1 && rightKeys.size == 1 =>
+          if leftKeys.size == rightKeys.size && leftKeys.nonEmpty =>
         // Try the right side as build (probe filter applied on the left).
         val withLeftProbe =
-          maybeInjectProbe(j, leftKeys.head, rightKeys.head, left, right, buildIsRight = true)
+          maybeInjectProbe(j, leftKeys, rightKeys, left, right, buildIsRight = true)
         // Then try the left side as build (probe filter applied on the right) on the
         // possibly-rewritten join. We re-extract because the join structure may have
         // changed if the first inject site succeeded.
         withLeftProbe match {
           case j2 @ ExtractEquiJoinKeys(_, lk2, rk2, _, _, l2, r2, _)
-              if lk2.size == 1 && rk2.size == 1 =>
-            maybeInjectProbe(j2, rk2.head, lk2.head, r2, l2, buildIsRight = false)
+              if lk2.size == rk2.size && lk2.nonEmpty =>
+            maybeInjectProbe(j2, rk2, lk2, r2, l2, buildIsRight = false)
           case other => other
         }
     }
@@ -66,19 +66,20 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
 
   private def maybeInjectProbe(
       join: Join,
-      probeKey: Expression,
-      buildKey: Expression,
+      probeKeys: Seq[Expression],
+      buildKeys: Seq[Expression],
       probePlan: LogicalPlan,
       buildPlan: LogicalPlan,
       buildIsRight: Boolean): LogicalPlan = {
     if (!canBroadcastBySize(buildPlan, conf)) return join
     if (canBroadcastBySize(probePlan, conf)) return join
     // Avoid re-injecting on a probe plan that already contains the same HRC subquery
-    // for this build key (idempotence under FixedPoint(1) re-trigger).
+    // for this build-key set (idempotence under FixedPoint(1) re-trigger).
     if (probePlan.exists {
       case Filter(cond, _) => cond.exists {
         case h: HashedRelationContainsSubquery =>
-          h.buildKeys.headOption.exists(_.semanticEquals(buildKey))
+          h.buildKeys.size == buildKeys.size &&
+            h.buildKeys.zip(buildKeys).forall { case (a, b) => a.semanticEquals(b) }
         case _ => false
       }
       case _ => false
@@ -86,10 +87,10 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       return join
     }
     val subquery = HashedRelationContainsSubquery(
-      pruningKey = probeKey,
+      pruningKeys = probeKeys,
       buildQuery = buildPlan,
-      buildKeys = Seq(buildKey),
-      broadcastKeyIndices = Seq(0))
+      buildKeys = buildKeys,
+      broadcastKeyIndices = buildKeys.indices)
     val newProbe = Filter(subquery, probePlan)
     if (buildIsRight) {
       join.copy(left = newProbe)

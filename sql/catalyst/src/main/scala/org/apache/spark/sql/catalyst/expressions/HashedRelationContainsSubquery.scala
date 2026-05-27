@@ -20,7 +20,6 @@ package org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.{HintInfo, LogicalPlan}
 import org.apache.spark.sql.catalyst.trees.TreePattern._
-import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.types.{BooleanType, DataType}
 
 /**
@@ -34,26 +33,24 @@ import org.apache.spark.sql.types.{BooleanType, DataType}
  * (so the optimizer's SubqueryExpression plumbing applies for free), but distinct
  * in identity so that physical planning can rewrite into HRC-specific exec nodes.
  *
- * @param pruningKey   the probe-side join key (this slice keeps it single-key;
- *                     composite-key packing lands in P2c per
- *                     features/spark-hashed-relation-contains/docs/0003-implementation-plan.md)
+ * @param pruningKeys  the probe-side join keys (parallel to broadcastKeyIndices order;
+ *                     composite-key packing via HashJoin.rewriteKeyExpr SSOT happens at
+ *                     physical planning in PlanHashedRelationContainsFilters per
+ *                     features/spark-hashed-relation-contains/docs/0007-investigation-p2c-1-composite-key-design.md)
  * @param buildQuery   the build-side subtree (subject to ReuseExchange / sameResult
  *                     reuse with the BHJ's own broadcast)
- * @param buildKeys    the build-side join keys; parallel to pruningKey
+ * @param buildKeys    the build-side join keys; parallel to pruningKeys
  * @param broadcastKeyIndices indices of the filtering keys collected from the broadcast
  */
 case class HashedRelationContainsSubquery(
-    pruningKey: Expression,
+    pruningKeys: Seq[Expression],
     buildQuery: LogicalPlan,
     buildKeys: Seq[Expression],
     broadcastKeyIndices: Seq[Int],
     exprId: ExprId = NamedExpression.newExprId,
     hint: Option[HintInfo] = None)
-  extends SubqueryExpression(buildQuery, Seq(pruningKey), exprId, Seq.empty, hint)
-  with Unevaluable
-  with UnaryLike[Expression] {
-
-  override def child: Expression = pruningKey
+  extends SubqueryExpression(buildQuery, pruningKeys, exprId, Seq.empty, hint)
+  with Unevaluable {
 
   override def dataType: DataType = BooleanType
 
@@ -65,21 +62,25 @@ case class HashedRelationContainsSubquery(
     copy(buildQuery = plan)
 
   override def withNewOuterAttrs(outerAttrs: Seq[Expression]): HashedRelationContainsSubquery = {
-    assert(outerAttrs.size == 1 && outerAttrs.head.semanticEquals(pruningKey))
-    copy()
+    assert(outerAttrs.size == pruningKeys.size)
+    copy(pruningKeys = outerAttrs)
   }
 
   override def withNewHint(hint: Option[HintInfo]): SubqueryExpression = copy(hint = hint)
 
   override lazy val resolved: Boolean = {
-    pruningKey.resolved &&
+    pruningKeys.nonEmpty &&
+      pruningKeys.forall(_.resolved) &&
       buildQuery.resolved &&
       buildKeys.nonEmpty &&
       buildKeys.forall(_.resolved) &&
+      broadcastKeyIndices.nonEmpty &&
+      broadcastKeyIndices.size == pruningKeys.size &&
       broadcastKeyIndices.forall(idx => idx >= 0 && idx < buildKeys.size) &&
       buildKeys.forall(_.references.subsetOf(buildQuery.outputSet)) &&
-      broadcastKeyIndices.size == 1 &&
-      pruningKey.dataType == buildKeys(broadcastKeyIndices.head).dataType
+      pruningKeys.zip(broadcastKeyIndices).forall { case (pk, idx) =>
+        pk.dataType == buildKeys(idx).dataType
+      }
   }
 
   final override def nodePatternsInternal(): Seq[TreePattern] =
@@ -89,12 +90,13 @@ case class HashedRelationContainsSubquery(
 
   override lazy val canonicalized: HashedRelationContainsSubquery = {
     copy(
-      pruningKey = pruningKey.canonicalized,
+      pruningKeys = pruningKeys.map(_.canonicalized),
       buildQuery = buildQuery.canonicalized,
       buildKeys = buildKeys.map(QueryPlan.normalizeExpressions(_, buildQuery.output)),
       exprId = ExprId(0))
   }
 
-  override protected def withNewChildInternal(newChild: Expression): HashedRelationContainsSubquery =
-    copy(pruningKey = newChild)
+  override protected def withNewChildrenInternal(
+      newChildren: IndexedSeq[Expression]): HashedRelationContainsSubquery =
+    copy(pruningKeys = newChildren)
 }

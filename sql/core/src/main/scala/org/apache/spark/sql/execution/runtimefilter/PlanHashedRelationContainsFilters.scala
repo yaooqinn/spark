@@ -58,7 +58,7 @@ case class PlanHashedRelationContainsFilters(sparkSession: SparkSession)
     plan.transformAllExpressionsWithPruning(
         _.containsPattern(HASHED_RELATION_CONTAINS_SUBQUERY)) {
       case HashedRelationContainsSubquery(
-          pruningKey, buildLogicalPlan, buildKeys, broadcastKeyIndices, _, _) =>
+          pruningKeys, buildLogicalPlan, buildKeys, broadcastKeyIndices, _, _) =>
         val buildSparkPlan = QueryExecution.createSparkPlan(
           sparkSession.sessionState.planner, buildLogicalPlan)
         // Mirror PlanDynamicPruningFilters: at preparations-time the BHJ build
@@ -82,11 +82,14 @@ case class PlanHashedRelationContainsFilters(sparkSession: SparkSession)
           val mode = HashedRelationBroadcastMode(packedBuildKeys)
           val exchange = BroadcastExchangeExec(mode, executedBuild)
           val ref = BroadcastedHashedRelationRef(exchange)
-          // Single-key path for M2 MVP per 0002c-contract.md section 1;
-          // composite-key
-          // packing lands in P2c.
-          val packedProbeKey = HashJoin.rewriteKeyExpr(Seq(pruningKey)).head
-          HashedRelationContainsExec(packedProbeKey, ref, NamedExpression.newExprId)
+          // Mirror the build-side packing on the probe side via the SAME
+          // HashJoin.rewriteKeyExpr SSOT (HashJoin.scala line 743-771). This
+          // is the byte-for-byte alignment that lets HRC reuse the broadcast
+          // HashedRelation's keys for free; see
+          // features/spark-hashed-relation-contains/docs/0007-investigation-p2c-1-composite-key-design.md
+          // section 3 axis 1.
+          val packedProbeKeys = HashJoin.rewriteKeyExpr(pruningKeys)
+          HashedRelationContainsExec(packedProbeKeys, ref, NamedExpression.newExprId)
         } else {
           // No reusable sibling BHJ broadcast: drop the filter. BHJ runs
           // unchanged. We intentionally do NOT plan a second
