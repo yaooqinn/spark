@@ -807,4 +807,45 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC does not inject when build is too big to broadcast (P2c-3 C.3 SPIP (d))") {
+    // SPIP (d): when the build side exceeds AUTO_BROADCASTJOIN_THRESHOLD, no
+    // BHJ is planned, so HRC must not inject. Detection short-circuits at
+    // maybeInjectProbe:L104 via canBroadcastBySize(buildPlan, conf) returning
+    // false. GREEN-on-HEAD sentinel; vacuous-pass guard confirms the executed
+    // plan really used SortMergeJoinExec (not an unexpected BHJ that would
+    // make the 0-HRC-inject assertion trivial).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      // Small threshold so range(1_000_000) cannot be broadcast as a build.
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "1024",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("big_build", "big_probe") {
+        // No BROADCAST hint: stats-based decision must reject both sides.
+        spark.range(1000000).toDF("k").createOrReplaceTempView("big_build")
+        spark.range(2000000).toDF("k").createOrReplaceTempView("big_probe")
+        val df = spark.sql(
+          "SELECT big_probe.k FROM big_probe JOIN big_build ON big_probe.k = big_build.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.isEmpty,
+          s"With both sides above AUTO_BROADCASTJOIN_THRESHOLD, the HRC rule " +
+            s"must not inject, but found ${injected.size}.\nPlan:\n" +
+            s"${optimized.treeString}")
+        val executed = df.queryExecution.executedPlan
+        val smj = executed.collect {
+          case s: org.apache.spark.sql.execution.joins.SortMergeJoinExec => s
+        }
+        assert(smj.nonEmpty,
+          s"SPIP (d) sentinel precondition not met: expected SortMergeJoinExec " +
+            s"in the executed plan (build too big to broadcast), but none found. " +
+            s"Without an actual non-BHJ join, the 0-HRC-inject assertion above " +
+            s"is vacuous.\nPlan:\n${executed.treeString}")
+      }
+    }
+  }
 }
