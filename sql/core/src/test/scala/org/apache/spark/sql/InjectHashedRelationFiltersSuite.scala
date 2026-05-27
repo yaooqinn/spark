@@ -894,4 +894,50 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC does not inject on self-join broadcast-both (P2c-3 C.5 SPIP (f))") {
+    // SPIP (f): a self-join where both sides are broadcastable on the same
+    // relation. The probe-broadcastable early-return at maybeInjectProbe:L105
+    // (canBroadcastBySize(probePlan, conf) == true) prevents inject because
+    // there's no asymmetric build/probe to filter. GREEN-on-HEAD sentinel;
+    // vacuous-pass guard asserts the executed plan really is a BHJ (not SMJ
+    // or anything else), proving both sides were considered broadcastable.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("t") {
+        spark.range(8).toDF("k").createOrReplaceTempView("t")
+        // Self-join, both sides broadcastable (range(8) is tiny + BROADCAST hint).
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(t) */ a.k FROM t a JOIN t b ON a.k = b.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.isEmpty,
+          s"On a self-join with both sides broadcastable, the HRC rule must " +
+            s"not inject (probe-broadcastable early-return at " +
+            s"maybeInjectProbe:L105), but found ${injected.size}.\nPlan:\n" +
+            s"${optimized.treeString}")
+        // Vacuous-pass guard: confirm the join landed as BHJ. If both sides
+        // were unexpectedly large enough to fall back to SMJ, the
+        // 0-HRC-inject assertion above would hold via C.1's path (no BHJ)
+        // not C.5's path (BHJ with probe-broadcastable early return).
+        val executed = df.queryExecution.executedPlan
+        val bhj = executed.collect {
+          case b: org.apache.spark.sql.execution.joins.BroadcastHashJoinExec => b
+        }
+        assert(bhj.nonEmpty,
+          s"SPIP (f) sentinel precondition not met: expected " +
+            s"BroadcastHashJoinExec in the executed plan (both sides " +
+            s"broadcastable), but none found. Without an actual BHJ, the " +
+            s"0-HRC-inject assertion would hold via the SMJ path (C.1) " +
+            s"rather than the probe-broadcastable early-return (C.5).\n" +
+            s"Plan:\n${executed.treeString}")
+      }
+    }
+  }
 }
