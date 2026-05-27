@@ -707,4 +707,54 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
           "regardless of plan shape")
     }
   }
+
+  // ===========================================================================
+  // P2c-3 Gate C — correctness audit (SPIP §2 (b)-(f) sentinels + joinType gate)
+  // Design: todos features/spark-hashed-relation-contains/docs/
+  //   0012-investigation-p2c-3-correctness-audit-design.md rev 2
+  // Plan:   todos features/spark-hashed-relation-contains/docs/
+  //   0003-implementation-plan.md rev 15 P2c-3 Gate C
+  // ===========================================================================
+
+  test("HRC does not inject when broadcast joins are disabled (P2c-3 C.1 SPIP (b))") {
+    // SPIP (b): when the join cannot be a BroadcastHashJoin (e.g. all broadcast
+    // joins disabled via AUTO_BROADCASTJOIN_THRESHOLD=-1), the HRC rule must
+    // not inject. Detection short-circuits inside maybeInjectProbe because
+    // canBroadcastBySize(buildPlan, conf) returns false for any plan when the
+    // threshold is -1. This sentinel is GREEN-on-HEAD; it locks in the
+    // current behavior so a later refactor cannot regress (b).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val df = spark.sql(
+          "SELECT probe.k FROM probe JOIN build ON probe.k = build.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.isEmpty,
+          s"With broadcast joins disabled (threshold=-1), the HRC rule must not " +
+            s"inject any HashedRelationContainsSubquery, but found ${injected.size}." +
+            s"\nPlan:\n${optimized.treeString}")
+        // Vacuous-pass guard: confirm the executed plan actually used SortMergeJoin,
+        // proving the SPIP (b) precondition (no BHJ available) was real, not an
+        // accidental no-join shape that trivially has 0 HRC injects.
+        val executed = df.queryExecution.executedPlan
+        val smj = executed.collect {
+          case s: org.apache.spark.sql.execution.joins.SortMergeJoinExec => s
+        }
+        assert(smj.nonEmpty,
+          s"SPIP (b) sentinel precondition not met: expected SortMergeJoinExec in " +
+            s"the executed plan (broadcast disabled), but none found. Without an " +
+            s"actual join, the 0-HRC-inject assertion above is vacuous.\nPlan:\n" +
+            s"${executed.treeString}")
+      }
+    }
+  }
 }
