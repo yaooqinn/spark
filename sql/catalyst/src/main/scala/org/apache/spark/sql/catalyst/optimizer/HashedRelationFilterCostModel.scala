@@ -47,9 +47,9 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * D.3 partial wire -- MinApplicationSize + MaxBuildSize + MaxFiltersPerScan
-   * gates. D.4-D.5 batches will extend this method with CreationSideThreshold
-   * / Bloom mutex checks per JIRA SPARK-XXXXX section 5.
+   * D.5 partial wire -- MinApplicationSize + MaxBuildSize + MaxFiltersPerScan
+   * + CreationSideThreshold gates. D.6 batch will extend with the Bloom mutex
+   * check per JIRA SPARK-XXXXX section 5.
    *
    * Per-scan budget: the caller passes `probeScanAnchor` (the
    * `output.head.exprId.id` of the probe-side leaf scan) and a mutable `budget`
@@ -57,6 +57,12 @@ private[sql] object HashedRelationFilterCostModel {
    * When the budget for this anchor has reached `maxFiltersPerScan`, the
    * decision is `Skip("per-scan-budget-exhausted")`. The caller increments the
    * budget after a successful inject (cost-model is read-only on budget).
+   *
+   * CreationSideThreshold is checked on `buildPlan.stats.sizeInBytes` (bytes),
+   * distinct from MaxBuildSize which gates on `stats.rowCount` (rows). The two
+   * gates are complementary: rowCount catches narrow-wide-row mismatch (e.g.
+   * 100 wide rows < 1M row cap but huge bytes), sizeInBytes catches the
+   * physical broadcast cost ceiling regardless of row count.
    */
   def shouldInject(
       buildPlan: LogicalPlan,
@@ -66,20 +72,27 @@ private[sql] object HashedRelationFilterCostModel {
       hasBloomOnSameLineage: Boolean,
       conf: SQLConf): Decision = {
     val buildRowCount = buildPlan.stats.rowCount.map(_.toLong).getOrElse(Long.MaxValue)
+    val buildSizeInBytes = buildPlan.stats.sizeInBytes.toLong
     val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
     val maxBuildRows = conf.runtimeFilterHashedRelationContainsMaxBuildSize
+    val creationSideThresholdBytes =
+      conf.runtimeFilterHashedRelationContainsCreationSideThreshold
     val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
     val maxFiltersPerScan = conf.runtimeFilterHashedRelationContainsMaxFiltersPerScan
     val injectedSoFar = budget.getOrElse(probeScanAnchor, 0)
     if (buildRowCount > maxBuildRows) {
       Skip(s"max-build-rows-exceeded: $buildRowCount > $maxBuildRows")
+    } else if (buildSizeInBytes > creationSideThresholdBytes) {
+      Skip(s"creation-side-threshold-exceeded: $buildSizeInBytes > " +
+        s"$creationSideThresholdBytes bytes")
     } else if (probeRowCount < minAppRows) {
       Skip(s"min-application-rows-not-met: $probeRowCount < $minAppRows")
     } else if (injectedSoFar >= maxFiltersPerScan) {
       Skip(s"per-scan-budget-exhausted: anchor=$probeScanAnchor " +
         s"injected=$injectedSoFar limit=$maxFiltersPerScan")
     } else {
-      Inject(s"d3-partial-wire-passed: buildRows=$buildRowCount probeRows=$probeRowCount " +
+      Inject(s"d5-partial-wire-passed: buildRows=$buildRowCount " +
+        s"buildBytes=$buildSizeInBytes probeRows=$probeRowCount " +
         s"anchor=$probeScanAnchor injected=$injectedSoFar/$maxFiltersPerScan")
     }
   }

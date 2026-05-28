@@ -127,6 +127,35 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     assert(budget(anchor) == 1, s"cost-model must not mutate budget, got ${budget.toMap}")
   }
 
+  test("D.5 CreationSideThreshold gate: Skip when build sizeInBytes exceeds threshold") {
+    val build = plan(100)
+    val probe = plan(10000)
+    val conf = new SQLConf
+    // Isolate D.5: open MinAppSize / MaxBuildSize / MaxFiltersPerScan so they
+    // don't Skip first. LocalRelation reports sizeInBytes=0 for empty data
+    // (no row backing) -- use threshold=0 so any non-negative buildBytes
+    // triggers the gate. The gate uses strict `>` so we additionally make
+    // the test stub return a non-zero size by overriding stats below.
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, Int.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, 0L)
+    // Stub a build whose sizeInBytes is provably > 0.
+    val sizedBuild = new LocalRelation(Seq(a, b)) {
+      override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
+        org.apache.spark.sql.catalyst.plans.logical.Statistics(
+          sizeInBytes = BigInt(1024L))
+    }
+    val budget = freshBudget
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      sizedBuild, probe, probeScanAnchor = 42L, budget,
+      hasBloomOnSameLineage = false, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
+      s"Skip expected when build sizeInBytes > threshold, got $decision")
+    assert(decision.reason.startsWith("creation-side-threshold-exceeded:"),
+      s"reason prefix mismatch, got '${decision.reason}'")
+  }
+
   test("D.0 skeleton: Decision ADT exhaustively pattern-matchable as sealed trait") {
     // Compiler enforces sealed via -Wunused, but a manual exhaustiveness check
     // here catches future Decision variants added without updating callers.
