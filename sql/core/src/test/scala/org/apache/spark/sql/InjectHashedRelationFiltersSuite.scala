@@ -1288,4 +1288,46 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC MaxFiltersPerScan is per-scan not per-query (P2d D.4 discrimination)") {
+    // D.4: 3 distinct probe scans (3 independent UNION-ALL'd subqueries), each
+    // with one broadcast build, MAX_FILTERS_PER_SCAN=1. Per-scan semantics
+    // yields inject == 3 (each anchor has its own budget, each at cap 1).
+    // Per-query semantics would have yielded inject == 1 (shared counter cap).
+    // The 3 != 1 difference is the load-bearing discrimination for the
+    // budget Map's per-anchor keying (probeScanAnchor = output.head.exprId.id).
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN.key -> "1",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+
+      withTempView("p1_d4", "p2_d4", "p3_d4", "b1_d4", "b2_d4", "b3_d4") {
+        spark.range(10000).toDF("k").createOrReplaceTempView("p1_d4")
+        spark.range(10000).toDF("k").createOrReplaceTempView("p2_d4")
+        spark.range(10000).toDF("k").createOrReplaceTempView("p3_d4")
+        spark.range(8).toDF("k").createOrReplaceTempView("b1_d4")
+        spark.range(8).toDF("k").createOrReplaceTempView("b2_d4")
+        spark.range(8).toDF("k").createOrReplaceTempView("b3_d4")
+        val df = spark.sql(
+          "SELECT /*+ BROADCAST(b1_d4) */ p1_d4.k FROM p1_d4 JOIN b1_d4 ON p1_d4.k = b1_d4.k " +
+            "UNION ALL " +
+            "SELECT /*+ BROADCAST(b2_d4) */ p2_d4.k FROM p2_d4 JOIN b2_d4 ON p2_d4.k = b2_d4.k " +
+            "UNION ALL " +
+            "SELECT /*+ BROADCAST(b3_d4) */ p3_d4.k FROM p3_d4 JOIN b3_d4 ON p3_d4.k = b3_d4.k")
+        val optimized = df.queryExecution.optimizedPlan
+        val injected = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injected.size == 3,
+          s"Expected exactly 3 HRC injects (per-scan budget over 3 distinct " +
+            s"probe scans each at cap 1), got ${injected.size}. " +
+            s"Per-query semantics would have yielded 1 (shared counter); the " +
+            s"3 != 1 difference is the discrimination.\nPlan:\n${optimized.treeString}")
+      }
+    }
+  }
 }
