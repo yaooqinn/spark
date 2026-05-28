@@ -44,28 +44,29 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     LocalRelation(a, b)
   }
 
-  test("D.0 skeleton: shouldInject returns Skip placeholder pending D.1-D.5 wiring") {
+  test("D.1 MinApplicationSize gate: Skip when probe rowCount below threshold") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
       build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
-      s"D.0 placeholder must return Skip, got $decision")
-    assert(decision.reason == "d0-skeleton-not-yet-wired",
-      s"placeholder reason mismatch, got '${decision.reason}'")
+      s"Skip expected when probe rowCount unset (defaults to 0) < threshold, got $decision")
+    assert(decision.reason.startsWith("min-application-rows-not-met:"),
+      s"reason prefix mismatch, got '${decision.reason}'")
   }
 
-  test("D.0 skeleton: Skip path does not mutate caller-managed budget Map") {
+  test("D.1 MinApplicationSize gate: Skip path does not mutate budget Map") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
     val budget = freshBudget
     HashedRelationFilterCostModel.shouldInject(
       build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
-    assert(budget.isEmpty,
-      s"Skip must not increment budget, but found ${budget.toMap}")
+    assert(budget.isEmpty, s"Skip must not increment budget, but found ${budget.toMap}")
   }
 
   test("D.0 skeleton: Decision ADT exhaustively pattern-matchable as sealed trait") {

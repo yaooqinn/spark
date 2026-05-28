@@ -47,10 +47,11 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * D.0 skeleton -- returns a placeholder Skip pending D.1-D.5 gate-wiring batches.
-   * Unit suite asserts the placeholder shape; integration suite (Gate D in
-   * InjectHashedRelationFiltersSuite) will assert real gating once D.1+ wires
-   * the SQLConfs into the rule body.
+   * D.1 partial wire -- MinApplicationSize gate only. D.2-D.5 batches will
+   * extend this method with MaxBuildSize / CreationSideThreshold /
+   * MaxFiltersPerScan / Bloom mutex checks per JIRA SPARK-XXXXX section 5.
+   * Until then, remaining gates remain enforced by InjectHashedRelationFilters
+   * directly (size + Bloom mutex are still in the rule body).
    */
   def shouldInject(
       buildPlan: LogicalPlan,
@@ -59,7 +60,13 @@ private[sql] object HashedRelationFilterCostModel {
       budget: mutable.Map[Long, Int],
       hasBloomOnSameLineage: Boolean,
       conf: SQLConf): Decision = {
-    Skip("d0-skeleton-not-yet-wired")
+    val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
+    val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
+    if (probeRowCount < minAppRows) {
+      Skip(s"min-application-rows-not-met: $probeRowCount < $minAppRows")
+    } else {
+      Inject(s"d1-partial-wire-passed: probeRows=$probeRowCount minRows=$minAppRows")
+    }
   }
 
   /**

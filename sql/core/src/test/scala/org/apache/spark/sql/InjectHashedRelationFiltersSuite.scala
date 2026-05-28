@@ -93,6 +93,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // the probe-side scan in a Filter(HashedRelationContainsSubquery(...)).
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       // Disable Bloom so its inject doesn't perturb the assertion. HRC is the
       // only runtime filter under test in this slice.
@@ -142,6 +143,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // AQE-aware HRC rewrite lands in P2b (PlanAdaptiveHashedRelationContainsFilters).
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -230,6 +232,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // P2c (composite key) MUST keep it green.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -329,6 +332,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     import org.apache.spark.sql.execution.debug.codegenString
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -362,6 +366,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // P2c-1 GREEN lifts the guard.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build2", "probe2") {
@@ -391,6 +396,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // guard rejects; expect FAIL until P2c-1 GREEN.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build3", "probe3") {
@@ -423,6 +429,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // is present in the executed plan (proof HRC participated).
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b15", "p15") {
@@ -480,6 +487,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // side UnsafeRow packing. Any schema/dataType mismatch yields 100% miss.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b16", "p16") {
@@ -524,6 +532,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // baseline. Sentinel for broadcastKeyIndices vs probe-key zipped order.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b17", "p17") {
@@ -647,6 +656,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   test("HRC still injects when Bloom filter is disabled (single key)") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build_s1", "probe_s1") {
@@ -670,6 +680,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   test("HRC still injects when Bloom filter is disabled (composite key)") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build_s2", "probe_s2") {
@@ -725,6 +736,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // current behavior so a later refactor cannot regress (b).
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -779,8 +791,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   // InjectHashedRelationFilters.apply / maybeInjectProbe. The body below is
   // the intended GREEN-after-P2d shape, kept here so reactivation is a
   // one-keyword edit.
-  ignore("HRC does not inject when probe is below MinApplicationSize " +
-    "(P2c-3 C.2 SPIP (c)) [pending-p2d: MinApplicationSize not wired]") {
+  // C.2 SPIP (c) tiny probe -> not injected. Activated by D.1 wiring of
+  // MinApplicationSize SQLConf into the cost model (delegated from
+  // maybeInjectProbe). probe row count well below default 10000 -> Skip.
+  test("HRC does not inject when probe is below MinApplicationSize " +
+    "(P2c-3 C.2 SPIP (c))") {
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       // Force the probe NOT broadcastable on its own so the C.5 early-return
@@ -817,6 +832,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // make the 0-HRC-inject assertion trivial).
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       // Small threshold so range(1_000_000) cannot be broadcast as a build.
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "1024",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
@@ -860,6 +876,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // because no join was planned.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -904,6 +921,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // or anything else), proving both sides were considered broadcastable.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -960,6 +978,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // injection.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1038,6 +1057,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // Both this assertion and the checkAnswer parity below should hold.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1114,6 +1134,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // joinType gate must preserve the LeftOuter block.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1188,6 +1209,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // joinTypes), so the gate is still the correct guard.
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {

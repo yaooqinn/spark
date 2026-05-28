@@ -114,6 +114,18 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildIsRight: Boolean): LogicalPlan = {
     if (!canBroadcastBySize(buildPlan, conf)) return join
     if (canBroadcastBySize(probePlan, conf)) return join
+    // D.1 cost-model gate: MinApplicationSize. Other gates (MaxBuildSize /
+    // MaxFiltersPerScan / CreationSideThreshold) will route through the cost
+    // model in D.2-D.5; for now only the MinApplicationSize check is delegated.
+    // probeScanAnchor / budget Map are placeholders pending D.3 per-scan budget
+    // wiring; D.1 passes 0L / empty Map because no per-scan accounting yet.
+    val emptyBudget = scala.collection.mutable.Map.empty[Long, Int]
+    HashedRelationFilterCostModel.shouldInject(
+      buildPlan, probePlan, probeScanAnchor = 0L, emptyBudget,
+      hasBloomOnSameLineage = false, conf) match {
+      case _: HashedRelationFilterCostModel.Skip => return join
+      case _: HashedRelationFilterCostModel.Inject => // continue
+    }
     // Skip HRC inject when the probe side already carries a Bloom filter on
     // overlapping scan lineage; gated by the SQLConf above. The Bloom probe
     // already covers the same membership check, and stacking both runtime
