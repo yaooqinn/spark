@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.expressions.AttributeMap
 import org.apache.spark.sql.catalyst.plans.PlanTest
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.catalyst.statsEstimation.StatsTestPlan
+import org.apache.spark.sql.catalyst.optimizer.HashedRelationFilterCostModel.SkipReasons._
 import org.apache.spark.sql.internal.SQLConf
 
 /**
@@ -58,7 +59,10 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, Long.MaxValue)
-    val decision = HashedRelationFilterCostModel.shouldInject(build, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 0, conf)
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
       s"Inject expected when stats missing (fail-open), got $decision")
     assert(decision.reason.contains("build-stats-unavailable"),
@@ -71,10 +75,13 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, 1L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
-    val decision = HashedRelationFilterCostModel.shouldInject(build, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 0, conf)
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build rowCount > 1, got $decision")
-    assert(decision.reason.startsWith("max-build-rows-exceeded:"),
+    assert(decision.reason.startsWith(MaxBuildRowsExceeded + ":"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
@@ -84,10 +91,13 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    val decision = HashedRelationFilterCostModel.shouldInject(build, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 0, conf)
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when probe rowCount < threshold, got $decision")
-    assert(decision.reason.startsWith("min-application-rows-not-met:"),
+    assert(decision.reason.startsWith(MinApplicationRowsNotMet + ":"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
@@ -98,10 +108,13 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, 2)
-    val decision = HashedRelationFilterCostModel.shouldInject(build, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 2, conf) // already at cap
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 2, conf) // already at cap
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when filterCounter at limit, got $decision")
-    assert(decision.reason.startsWith("per-query-budget-exhausted:"),
+    assert(decision.reason.startsWith(PerQueryBudgetExhausted + ":"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
@@ -112,7 +125,10 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, 2)
-    val decision = HashedRelationFilterCostModel.shouldInject(build, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 1, conf) // below cap
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 1, conf) // below cap
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
       s"Inject expected when filterCounter below limit, got $decision")
   }
@@ -126,10 +142,13 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, Int.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, 0L)
     val sizedBuild = plan(rows = 1L, sizeInBytes = Some(1024L))
-    val decision = HashedRelationFilterCostModel.shouldInject(sizedBuild, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 0, conf)
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      sizedBuild, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build sizeInBytes > threshold, got $decision")
-    assert(decision.reason.startsWith("creation-side-threshold-exceeded:"),
+    assert(decision.reason.startsWith(CreationSideThresholdExceeded + ":"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
@@ -139,28 +158,58 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val conf = new SQLConf
     val decision = HashedRelationFilterCostModel.shouldInject(
       build, probe,
-      buildBroadcastable = false,
-      probeBroadcastable = false,
+      buildBroadcastable = false, probeBroadcastable = false,
       filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build not broadcastable, got $decision")
-    assert(decision.reason == "build-not-broadcastable",
+    assert(decision.reason == BuildNotBroadcastable,
       s"reason mismatch, got '${decision.reason}'")
   }
 
-  test("broadcastability gate: Skip with `probe-broadcastable` when probe is itself broadcastable") {
+  test("broadcastability gate: Skip with `probe-broadcastable` when probe is broadcastable") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
     val decision = HashedRelationFilterCostModel.shouldInject(
       build, probe,
-      buildBroadcastable = true,
-      probeBroadcastable = true,
+      buildBroadcastable = true, probeBroadcastable = true,
       filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when probe is broadcastable, got $decision")
-    assert(decision.reason == "probe-broadcastable",
+    assert(decision.reason == ProbeBroadcastable,
       s"reason mismatch, got '${decision.reason}'")
+  }
+
+  test("MaxFiltersPerQuery gate: 2-call sequence pins counter-advances-across-sites " +
+    "(not reset)") {
+    // H4 (Stage 5 P2e r1): proves the per-query counter semantics survive a
+    // future refactor that might accidentally reset `filterCounter` inside the
+    // rule's transformWithPruning arm. Set cap=1 and simulate two sequential
+    // gate calls: the first (counter=0) Injects; the second (counter=1, as the
+    // caller would pass after the first inject) must Skip with the
+    // per-query-budget-exhausted reason. A counter-reset bug would let the
+    // second call Inject again.
+    val build = plan(100)
+    val probe = plan(10000)
+    val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, 1)
+    val firstCall = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
+    assert(firstCall.isInstanceOf[HashedRelationFilterCostModel.Inject],
+      s"First call (filterCounter=0, cap=1) should Inject, got $firstCall")
+    val secondCall = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 1, conf)
+    assert(secondCall.isInstanceOf[HashedRelationFilterCostModel.Skip],
+      s"Second call (filterCounter=1, cap=1) should Skip, got $secondCall")
+    assert(secondCall.reason.startsWith(PerQueryBudgetExhausted + ":"),
+      s"Second-call Skip reason should pin per-query-budget-exhausted " +
+        s"(else a counter-reset bug would silently pass), got '${secondCall.reason}'")
   }
 
   test("Decision ADT exhaustively pattern-matchable as sealed trait") {
