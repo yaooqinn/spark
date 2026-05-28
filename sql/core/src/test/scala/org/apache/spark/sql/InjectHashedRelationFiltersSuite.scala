@@ -40,6 +40,15 @@ import org.apache.spark.sql.types.{BinaryType, IntegerType}
 class InjectHashedRelationFiltersSuite extends SharedSparkSession
   with org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper {
 
+  // Open the cost-model row-count gates so tests that exercise unrelated
+  // mechanisms (BHJ trigger, joinType correctness, Bloom mutex, etc.) do not
+  // need to repeat the same per-test withSQLConf boilerplate. Tests that
+  // explicitly target the MinApplicationSize or MaxBuildSize gates override
+  // these in their own withSQLConf block.
+  private val hrcGatesOff: Seq[(String, String)] = Seq(
+    SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+    SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString)
+
   test("InjectHashedRelationFilters rule object exists in catalyst.optimizer") {
     // P2a RED #1: the rule must be a registered Catalyst optimizer object.
     // Until the production class lands, this import fails to compile, which
@@ -91,14 +100,12 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // P2a-4 RED #6: the first behavioral RED. Constructs a tiny equi-join where
     // one side is broadcastable and the other is not; expects the rule to wrap
     // the probe-side scan in a Filter(HashedRelationContainsSubquery(...)).
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       // Disable Bloom so its inject doesn't perturb the assertion. HRC is the
       // only runtime filter under test in this slice.
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
 
       // Small build side (broadcastable under 5000-byte threshold) joined with
       // a synthetic 10_000-row probe (not broadcastable). The rule should inject
@@ -142,13 +149,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // preparations rule and wraps everything as a leaf AdaptiveSparkPlanExec,
     // causing all subsequent preparations rules (including ours) to no-op.
     // AQE-aware HRC rewrite lands in P2b (PlanAdaptiveHashedRelationContainsFilters).
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         spark.range(8).toDF("k").createOrReplaceTempView("build")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe")
@@ -232,13 +237,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // No production change paired with this test -- it codifies the invariant
     // already established by P2a-5c-r2 GREEN end-to-end. Future P2b (AQE) and
     // P2c (composite key) MUST keep it green.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         spark.range(8).toDF("k").createOrReplaceTempView("build")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe")
@@ -333,13 +336,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // eval(), no inline broadcast reference is emitted in the generated Java
     // -- the only broadcast reference present is BHJ's, not HRC's.
     import org.apache.spark.sql.execution.debug.codegenString
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         spark.range(8).toDF("k").createOrReplaceTempView("build")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe")
@@ -368,12 +369,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // (two IntegralType keys, sum <= 8B). Currently `size == 1` guard at
     // InjectHashedRelationFilters.scala L51 short-circuits; expect FAIL until
     // P2c-1 GREEN lifts the guard.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("build2", "probe2") {
         spark.range(8).selectExpr("cast(id as int) as k1", "cast(id as int) as k2")
           .createOrReplaceTempView("build2")
@@ -399,12 +398,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // (string forces UnsafeRow fallback per HashJoin.rewriteKeyExpr L743-747
     // canRewriteAsLongType check: not all IntegralType). Currently `size == 1`
     // guard rejects; expect FAIL until P2c-1 GREEN.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("build3", "probe3") {
         spark.range(8).selectExpr("cast(id as int) as k1", "cast(id as string) as k2")
           .createOrReplaceTempView("build3")
@@ -433,12 +430,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // composite probe-key shape is bit-misaligned, packed-Long lookup misses
     // and BHJ救回 still yields the right answer -- so we also assert HRC node
     // is present in the executed plan (proof HRC participated).
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("b15", "p15") {
         // Build: 16 composite keys (k1=0..3, k2=0..3 cartesian).
         spark.range(16).selectExpr(
@@ -492,12 +487,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // Seq; doGenCode emits GenerateUnsafeProjection.createCode and
     // HashedRelation.getValue(InternalRow) byte-compares against the build-
     // side UnsafeRow packing. Any schema/dataType mismatch yields 100% miss.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("b16", "p16") {
         spark.range(16).selectExpr(
           "cast(id % 4 as int) as k1",
@@ -538,12 +531,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // P2c-1 B.7 (per stage2-r10 F3.1): probe (k1=y AND k2=w) and (k2=w AND
     // k1=y) must produce identical row sets, AND both must equal the HRC-off
     // baseline. Sentinel for broadcastKeyIndices vs probe-key zipped order.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("b17", "p17") {
         spark.range(16).selectExpr(
           "cast(id % 4 as int) as k1",
@@ -663,12 +654,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   }
 
   test("HRC still injects when Bloom filter is disabled (single key)") {
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("build_s1", "probe_s1") {
         spark.range(8).toDF("k").createOrReplaceTempView("build_s1")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe_s1")
@@ -688,12 +677,10 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
   }
 
   test("HRC still injects when Bloom filter is disabled (composite key)") {
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
       withTempView("build_s2", "probe_s2") {
         spark.range(8).selectExpr("cast(id as int) as k1", "cast(id as int) as k2")
           .createOrReplaceTempView("build_s2")
@@ -745,13 +732,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // canBroadcastBySize(buildPlan, conf) returns false for any plan when the
     // threshold is -1. This sentinel is GREEN-on-HEAD; it locks in the
     // current behavior so a later refactor cannot regress (b).
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         spark.range(8).toDF("k").createOrReplaceTempView("build")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe")
@@ -887,13 +872,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // exists in the executed plan (BroadcastNestedLoopJoinExec when one side
     // is broadcastable) so the 0-HRC-inject assertion isn't trivially true
     // because no join was planned.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         spark.range(8).toDF("k").createOrReplaceTempView("build")
         spark.range(10000).toDF("k").createOrReplaceTempView("probe")
@@ -933,13 +916,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // there's no asymmetric build/probe to filter. GREEN-on-HEAD sentinel;
     // vacuous-pass guard asserts the executed plan really is a BHJ (not SMJ
     // or anything else), proving both sides were considered broadcastable.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("t") {
         spark.range(8).toDF("k").createOrReplaceTempView("t")
         // Self-join, both sides broadcastable (range(8) is tiny + BROADCAST hint).
@@ -991,13 +972,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // Peer ground: InjectRuntimeFilter.scala uses canPruneLeft / canPruneRight
     // from JoinSelectionHelper; LeftAnti -> case _ => false in both, blocking
     // injection.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         // build keys 0..4 (broadcastable, ~40 bytes). probe rows 0..49999
         // (much larger than 5000-byte threshold so canBroadcastBySize(probe)
@@ -1071,13 +1050,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // After §3 prod fix (canPruneLeft/canPruneRight gate landed in
     // InjectHashedRelationFilters.apply), HRC must not inject on this probe.
     // Both this assertion and the checkAnswer parity below should hold.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         // build keys 0..4 (broadcastable). probe rows 0..49999 (not
         // broadcastable: avoids C.5 early-return masking the gate).
@@ -1149,13 +1126,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // InjectHashedRelationFilters.apply for C.7 also covers LeftOuter.
     // C.6 stays as anti-regression: any future change that loosens the
     // joinType gate must preserve the LeftOuter block.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         // build keys 0..4 (broadcastable). probe rows 0..49999 (not
         // broadcastable: avoids C.5 early-return masking the gate).
@@ -1225,13 +1200,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // SortMergeJoin/BroadcastNestedLoopJoin. The HRC rule still inspects the
     // logical plan via ExtractEquiJoinKeys (which wildcard-matches all
     // joinTypes), so the gate is still the correct guard.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
-      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false")): _*) {
       withTempView("build", "probe") {
         // Small build, large probe (probe must not be broadcastable so C.5
         // early-return cannot mask the gate).
@@ -1295,13 +1268,11 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     // The single rule-invocation counter caps the total at 1 across all scans,
     // mirroring `InjectRuntimeFilter`'s `var filterCounter` /
     // `RUNTIME_FILTER_NUMBER_THRESHOLD` shape.
-    withSQLConf(
+    withSQLConf((hrcGatesOff ++ Seq(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
-      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY.key -> "1",
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
-      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false")): _*) {
 
       withTempView("p1_q", "p2_q", "p3_q", "b1_q", "b2_q", "b3_q") {
         spark.range(10000).toDF("k").createOrReplaceTempView("p1_q")
