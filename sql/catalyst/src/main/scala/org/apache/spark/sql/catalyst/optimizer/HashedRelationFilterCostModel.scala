@@ -33,7 +33,6 @@ private[sql] object HashedRelationFilterCostModel {
     val ProbeBroadcastable = "probe-broadcastable"
     val PerQueryBudgetExhausted = "per-query-budget-exhausted"
     val MaxBuildRowsExceeded = "max-build-rows-exceeded"
-    val StatsUnavailable = "build-size-stats-unavailable"
     val CreationSideThresholdExceeded = "creation-side-threshold-exceeded"
     val MinApplicationRowsNotMet = "min-application-rows-not-met"
   }
@@ -60,9 +59,9 @@ private[sql] object HashedRelationFilterCostModel {
    * CreationSideThreshold is checked on `stats.sizeInBytes`; MaxBuildSize is
    * checked on `stats.rowCount`. The two are complementary (wide rows vs
    * narrow-many-rows). When `stats.sizeInBytes` equals the no-stats sentinel
-   * `conf.defaultSizeInBytes`, the gate returns the distinct
-   * `build-size-stats-unavailable` reason rather than a misleading
-   * `creation-side-threshold-exceeded`.
+   * `conf.defaultSizeInBytes`, we fail open: the canBroadcastBySize gate
+   * (already checked above) bounds the build size, so we do not Skip on
+   * missing stats alone.
    */
   def shouldInject(
       buildPlan: LogicalPlan,
@@ -100,12 +99,8 @@ private[sql] object HashedRelationFilterCostModel {
     val creationSideThresholdBytes =
       conf.runtimeFilterHashedRelationContainsCreationSideThreshold
     val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
-    val defaultSizeInBytes = conf.defaultSizeInBytes
     if (buildRowCount > maxBuildRows) {
       Skip(s"$MaxBuildRowsExceeded: $buildRowCount > $maxBuildRows")
-    } else if (buildSizeInBytesBig == BigInt(defaultSizeInBytes)) {
-      Skip(s"$StatsUnavailable: build.stats.sizeInBytes == defaultSizeInBytes " +
-        s"($defaultSizeInBytes)")
     } else if (buildSizeInBytes > creationSideThresholdBytes) {
       Skip(s"$CreationSideThresholdExceeded: $buildSizeInBytes > " +
         s"$creationSideThresholdBytes bytes")
