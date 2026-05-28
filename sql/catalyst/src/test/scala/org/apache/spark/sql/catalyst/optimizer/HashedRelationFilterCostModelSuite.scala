@@ -90,6 +90,43 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     assert(budget.isEmpty, s"Skip must not increment budget, but found ${budget.toMap}")
   }
 
+  test("D.3 MaxFiltersPerScan gate: Skip when budget for this anchor at limit") {
+    val build = plan(100)
+    val probe = plan(10000)
+    val conf = new SQLConf
+    // Isolate D.3: open MinAppSize / MaxBuildSize so they don't Skip first.
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, 2)
+    val budget = freshBudget
+    val anchor = 99L
+    budget(anchor) = 2 // already at cap
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe, probeScanAnchor = anchor, budget, hasBloomOnSameLineage = false, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
+      s"Skip expected when budget at limit, got $decision")
+    assert(decision.reason.startsWith("per-scan-budget-exhausted:"),
+      s"reason prefix mismatch, got '${decision.reason}'")
+  }
+
+  test("D.3 MaxFiltersPerScan gate: Inject when budget for this anchor below limit") {
+    val build = plan(100)
+    val probe = plan(10000)
+    val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, 2)
+    val budget = freshBudget
+    val anchor = 99L
+    budget(anchor) = 1 // below cap
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe, probeScanAnchor = anchor, budget, hasBloomOnSameLineage = false, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
+      s"Inject expected when budget below limit, got $decision")
+    // Cost model is read-only on budget: caller increments post-Inject.
+    assert(budget(anchor) == 1, s"cost-model must not mutate budget, got ${budget.toMap}")
+  }
+
   test("D.0 skeleton: Decision ADT exhaustively pattern-matchable as sealed trait") {
     // Compiler enforces sealed via -Wunused, but a manual exhaustiveness check
     // here catches future Decision variants added without updating callers.

@@ -72,10 +72,17 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
     }
   }
 
+  /**
+   * Per-scan inject budget. Fresh per `apply` invocation, not shared across
+   * concurrent queries. Key = `output.head.exprId.id` of the probe-side plan
+   * (`probeScanAnchor`); value = number of HRC filters already injected onto
+   * that scan in this rule invocation.
+   */
   override def apply(plan: LogicalPlan): LogicalPlan = {
     if (!conf.runtimeFilterHashedRelationContainsEnabled) {
       return plan
     }
+    val budget = scala.collection.mutable.Map.empty[Long, Int]
     plan.transformWithPruning(_.containsPattern(JOIN)) {
       case j @ ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, left, right, hint)
           if leftKeys.size == rightKeys.size && leftKeys.nonEmpty =>
@@ -89,7 +96,7 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
         // silently-wrong P0 evidence.
         // Try the right side as build (probe filter applied on the left).
         val withLeftProbe = if (canPruneLeft(joinType)) {
-          maybeInjectProbe(j, leftKeys, rightKeys, left, right, buildIsRight = true)
+          maybeInjectProbe(j, leftKeys, rightKeys, left, right, buildIsRight = true, budget)
         } else {
           j
         }
@@ -99,7 +106,7 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
         withLeftProbe match {
           case j2 @ ExtractEquiJoinKeys(jt2, lk2, rk2, _, _, l2, r2, _)
               if lk2.size == rk2.size && lk2.nonEmpty && canPruneRight(jt2) =>
-            maybeInjectProbe(j2, rk2, lk2, r2, l2, buildIsRight = false)
+            maybeInjectProbe(j2, rk2, lk2, r2, l2, buildIsRight = false, budget)
           case other => other
         }
     }
@@ -111,17 +118,22 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildKeys: Seq[Expression],
       probePlan: LogicalPlan,
       buildPlan: LogicalPlan,
-      buildIsRight: Boolean): LogicalPlan = {
+      buildIsRight: Boolean,
+      budget: scala.collection.mutable.Map[Long, Int]): LogicalPlan = {
     if (!canBroadcastBySize(buildPlan, conf)) return join
     if (canBroadcastBySize(probePlan, conf)) return join
-    // D.1 cost-model gate: MinApplicationSize. Other gates (MaxBuildSize /
-    // MaxFiltersPerScan / CreationSideThreshold) will route through the cost
-    // model in D.2-D.5; for now only the MinApplicationSize check is delegated.
-    // probeScanAnchor / budget Map are placeholders pending D.3 per-scan budget
-    // wiring; D.1 passes 0L / empty Map because no per-scan accounting yet.
-    val emptyBudget = scala.collection.mutable.Map.empty[Long, Int]
+    // D.3 cost-model gates: MinApplicationSize + MaxBuildSize + MaxFiltersPerScan.
+    // CreationSideThreshold / Bloom mutex will route through the cost model in
+    // D.4-D.5. probeScanAnchor uses the probe-side `output.head.exprId.id`
+    // (Q4 anchor lock, see JIRA SPARK-XXXXX section 5); the budget Map is owned
+    // by `apply` (fresh per rule invocation, not shared across queries).
+    val probeScanAnchor = if (probePlan.output.nonEmpty) {
+      probePlan.output.head.exprId.id
+    } else {
+      0L
+    }
     HashedRelationFilterCostModel.shouldInject(
-      buildPlan, probePlan, probeScanAnchor = 0L, emptyBudget,
+      buildPlan, probePlan, probeScanAnchor, budget,
       hasBloomOnSameLineage = false, conf) match {
       case _: HashedRelationFilterCostModel.Skip => return join
       case _: HashedRelationFilterCostModel.Inject => // continue
@@ -152,6 +164,9 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildKeys = buildKeys,
       broadcastKeyIndices = buildKeys.indices)
     val newProbe = Filter(subquery, probePlan)
+    // Post-Inject: increment per-scan budget so subsequent candidates on the
+    // same probe scan respect MaxFiltersPerScan.
+    budget(probeScanAnchor) = budget.getOrElse(probeScanAnchor, 0) + 1
     if (buildIsRight) {
       join.copy(left = newProbe)
     } else {

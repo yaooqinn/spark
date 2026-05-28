@@ -47,9 +47,16 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * D.2 partial wire -- MinApplicationSize + MaxBuildSize gates. D.3-D.5
-   * batches will extend this method with MaxFiltersPerScan / CreationSideThreshold
+   * D.3 partial wire -- MinApplicationSize + MaxBuildSize + MaxFiltersPerScan
+   * gates. D.4-D.5 batches will extend this method with CreationSideThreshold
    * / Bloom mutex checks per JIRA SPARK-XXXXX section 5.
+   *
+   * Per-scan budget: the caller passes `probeScanAnchor` (the
+   * `output.head.exprId.id` of the probe-side leaf scan) and a mutable `budget`
+   * Map shared across all `shouldInject` calls within a single rule invocation.
+   * When the budget for this anchor has reached `maxFiltersPerScan`, the
+   * decision is `Skip("per-scan-budget-exhausted")`. The caller increments the
+   * budget after a successful inject (cost-model is read-only on budget).
    */
   def shouldInject(
       buildPlan: LogicalPlan,
@@ -62,12 +69,18 @@ private[sql] object HashedRelationFilterCostModel {
     val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
     val maxBuildRows = conf.runtimeFilterHashedRelationContainsMaxBuildSize
     val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
+    val maxFiltersPerScan = conf.runtimeFilterHashedRelationContainsMaxFiltersPerScan
+    val injectedSoFar = budget.getOrElse(probeScanAnchor, 0)
     if (buildRowCount > maxBuildRows) {
       Skip(s"max-build-rows-exceeded: $buildRowCount > $maxBuildRows")
     } else if (probeRowCount < minAppRows) {
       Skip(s"min-application-rows-not-met: $probeRowCount < $minAppRows")
+    } else if (injectedSoFar >= maxFiltersPerScan) {
+      Skip(s"per-scan-budget-exhausted: anchor=$probeScanAnchor " +
+        s"injected=$injectedSoFar limit=$maxFiltersPerScan")
     } else {
-      Inject(s"d2-partial-wire-passed: buildRows=$buildRowCount probeRows=$probeRowCount")
+      Inject(s"d3-partial-wire-passed: buildRows=$buildRowCount probeRows=$probeRowCount " +
+        s"anchor=$probeScanAnchor injected=$injectedSoFar/$maxFiltersPerScan")
     }
   }
 
