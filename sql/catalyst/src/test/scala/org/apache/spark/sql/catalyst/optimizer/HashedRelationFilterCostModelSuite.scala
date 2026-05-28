@@ -44,11 +44,31 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     LocalRelation(a, b)
   }
 
+  test("D.2 MaxBuildSize gate: Skip when build rowCount exceeds threshold") {
+    val build = plan(100)
+    val probe = plan(10000)
+    val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, 1L)
+    // probe rowCount unset (defaults to 0) would also Skip on MinAppSize, but
+    // build-size check runs first; we drop MinAppSize requirement to isolate.
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    val budget = freshBudget
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
+      s"Skip expected when build rowCount (Long.MaxValue stub) > 1, got $decision")
+    assert(decision.reason.startsWith("max-build-rows-exceeded:"),
+      s"reason prefix mismatch, got '${decision.reason}'")
+  }
+
   test("D.1 MinApplicationSize gate: Skip when probe rowCount below threshold") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
+    // LocalRelation stats.rowCount is None -> getOrElse(Long.MaxValue) on build
+    // would trip MaxBuildSize first; opt out to isolate MinAppSize.
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
       build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
@@ -63,6 +83,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     val budget = freshBudget
     HashedRelationFilterCostModel.shouldInject(
       build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)

@@ -60,6 +60,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {
@@ -89,6 +90,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {
@@ -146,6 +148,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {
@@ -187,6 +190,7 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {

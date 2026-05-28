@@ -94,6 +94,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       // Disable Bloom so its inject doesn't perturb the assertion. HRC is the
       // only runtime filter under test in this slice.
@@ -144,6 +145,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -233,6 +235,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -333,6 +336,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -367,6 +371,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build2", "probe2") {
@@ -397,6 +402,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build3", "probe3") {
@@ -430,6 +436,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b15", "p15") {
@@ -488,6 +495,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b16", "p16") {
@@ -533,6 +541,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("b17", "p17") {
@@ -657,6 +666,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build_s1", "probe_s1") {
@@ -681,6 +691,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false") {
       withTempView("build_s2", "probe_s2") {
@@ -737,6 +748,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -833,6 +845,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       // Small threshold so range(1_000_000) cannot be broadcast as a build.
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "1024",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
@@ -877,6 +890,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -922,6 +936,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -979,6 +994,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1058,6 +1074,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1135,6 +1152,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
@@ -1210,6 +1228,7 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
     withSQLConf(
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
       SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE.key -> "0",
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE.key -> Long.MaxValue.toString,
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
       SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {

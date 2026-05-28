@@ -47,11 +47,9 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * D.1 partial wire -- MinApplicationSize gate only. D.2-D.5 batches will
-   * extend this method with MaxBuildSize / CreationSideThreshold /
-   * MaxFiltersPerScan / Bloom mutex checks per JIRA SPARK-XXXXX section 5.
-   * Until then, remaining gates remain enforced by InjectHashedRelationFilters
-   * directly (size + Bloom mutex are still in the rule body).
+   * D.2 partial wire -- MinApplicationSize + MaxBuildSize gates. D.3-D.5
+   * batches will extend this method with MaxFiltersPerScan / CreationSideThreshold
+   * / Bloom mutex checks per JIRA SPARK-XXXXX section 5.
    */
   def shouldInject(
       buildPlan: LogicalPlan,
@@ -60,12 +58,16 @@ private[sql] object HashedRelationFilterCostModel {
       budget: mutable.Map[Long, Int],
       hasBloomOnSameLineage: Boolean,
       conf: SQLConf): Decision = {
+    val buildRowCount = buildPlan.stats.rowCount.map(_.toLong).getOrElse(Long.MaxValue)
     val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
+    val maxBuildRows = conf.runtimeFilterHashedRelationContainsMaxBuildSize
     val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
-    if (probeRowCount < minAppRows) {
+    if (buildRowCount > maxBuildRows) {
+      Skip(s"max-build-rows-exceeded: $buildRowCount > $maxBuildRows")
+    } else if (probeRowCount < minAppRows) {
       Skip(s"min-application-rows-not-met: $probeRowCount < $minAppRows")
     } else {
-      Inject(s"d1-partial-wire-passed: probeRows=$probeRowCount minRows=$minAppRows")
+      Inject(s"d2-partial-wire-passed: buildRows=$buildRowCount probeRows=$probeRowCount")
     }
   }
 
