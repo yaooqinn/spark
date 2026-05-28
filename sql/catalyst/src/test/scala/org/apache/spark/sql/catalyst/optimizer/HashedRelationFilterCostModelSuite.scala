@@ -18,8 +18,10 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.sql.catalyst.dsl.expressions._
+import org.apache.spark.sql.catalyst.expressions.AttributeMap
 import org.apache.spark.sql.catalyst.plans.PlanTest
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
+import org.apache.spark.sql.catalyst.statsEstimation.StatsTestPlan
 import org.apache.spark.sql.internal.SQLConf
 
 /**
@@ -36,26 +38,21 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
   private val a = $"a".int
   private val b = $"b".int
 
-  private def plan(rows: Int): LocalRelation = {
-    // LocalRelation.computeStats reports rowCount = None by default. Override
-    // so tests can isolate gates that depend on rowCount being present
-    // (MaxBuildSize / MinApplicationSize). Pass rows = -1 to keep the default
-    // None (used by the build-stats-unavailable Inject test).
-    if (rows < 0) {
-      LocalRelation(a, b)
-    } else {
-      new LocalRelation(Seq(a, b)) {
-        override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
-          org.apache.spark.sql.catalyst.plans.logical.Statistics(
-            sizeInBytes = BigInt(rows.toLong * 16L), // 2 LongType cols
-            rowCount = Some(BigInt(rows.toLong)))
-      }
-    }
+  /** Stats-bearing plan via the catalyst `StatsTestPlan` (peer convention). */
+  private def plan(rows: Long, sizeInBytes: Option[Long] = None): StatsTestPlan = {
+    StatsTestPlan(
+      outputList = Seq(a, b),
+      rowCount = BigInt(rows),
+      attributeStats = AttributeMap.empty,
+      size = sizeInBytes.map(BigInt(_)).orElse(Some(BigInt(rows * 16L))))
   }
+
+  /** Plan with no rowCount stats (CBO-off / no column stats). */
+  private def planWithoutStats(): LocalRelation = LocalRelation(a, b)
 
   test("build-stats-unavailable: Inject with hint when build rowCount is None " +
     "(CBO off or no column stats; fail-open)") {
-    val build = plan(-1) // rowCount = None
+    val build = planWithoutStats() // rowCount = None
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
@@ -128,12 +125,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, Int.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, 0L)
-    val sizedBuild = new LocalRelation(Seq(a, b)) {
-      override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
-        org.apache.spark.sql.catalyst.plans.logical.Statistics(
-          sizeInBytes = BigInt(1024L),
-          rowCount = Some(BigInt(1L)))
-    }
+    val sizedBuild = plan(rows = 1L, sizeInBytes = Some(1024L))
     val decision = HashedRelationFilterCostModel.shouldInject(sizedBuild, probe, buildBroadcastable = true, probeBroadcastable = false, filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build sizeInBytes > threshold, got $decision")
@@ -195,11 +187,11 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     assert(ranked.head eq p)
   }
 
-  test("rankBuilds: three-element input is a stable sort by sizeInBytes ascending") {
-    val plans = Seq(plan(10), plan(50), plan(20))
-    val ranked = HashedRelationFilterCostModel.rankBuilds(plans)
-    assert(ranked.size == 3)
-    // All sizes equal in the LocalRelation stub -> stable sort preserves order
-    assert(ranked == plans)
+  test("rankBuilds: three-element input is sorted by sizeInBytes ascending") {
+    val small = plan(10L)   // size = 160
+    val mid = plan(50L)     // size = 800
+    val large = plan(20L, sizeInBytes = Some(10000L)) // overrides default
+    val ranked = HashedRelationFilterCostModel.rankBuilds(Seq(large, small, mid))
+    assert(ranked == Seq(small, mid, large))
   }
 }
