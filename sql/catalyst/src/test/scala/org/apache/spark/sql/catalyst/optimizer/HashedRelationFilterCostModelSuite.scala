@@ -39,9 +39,37 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
   private def freshBudget = mutable.Map.empty[Long, Int]
 
   private def plan(rows: Int): LocalRelation = {
-    // Stub a LocalRelation; LocalRelation.computeStats uses output type sizes
-    // and we don't need exact byte counts here -- Decision shape is the focus.
-    LocalRelation(a, b)
+    // LocalRelation.computeStats reports rowCount = None by default. Override
+    // so tests can isolate gates that depend on rowCount being present
+    // (MaxBuildSize / MinApplicationSize). Pass rows = -1 to keep the default
+    // None (used by the build-stats-unavailable Skip test).
+    if (rows < 0) {
+      LocalRelation(a, b)
+    } else {
+      new LocalRelation(Seq(a, b)) {
+        override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
+          org.apache.spark.sql.catalyst.plans.logical.Statistics(
+            sizeInBytes = BigInt(rows.toLong * 16L), // 2 LongType cols
+            rowCount = Some(BigInt(rows.toLong)))
+      }
+    }
+  }
+
+  test("build-stats-unavailable: Inject with hint when build rowCount is None " +
+    "(CBO off or no column stats; fail-open)") {
+    val build = plan(-1) // rowCount = None
+    val probe = plan(10000)
+    val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, Long.MaxValue)
+    val budget = freshBudget
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
+      s"Inject expected when stats missing (fail-open), got $decision")
+    assert(decision.reason.contains("build-stats-unavailable"),
+      s"Inject reason should carry build-stats-unavailable hint, got '${decision.reason}'")
   }
 
   test("D.2 MaxBuildSize gate: Skip when build rowCount exceeds threshold") {
@@ -144,7 +172,8 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val sizedBuild = new LocalRelation(Seq(a, b)) {
       override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
         org.apache.spark.sql.catalyst.plans.logical.Statistics(
-          sizeInBytes = BigInt(1024L))
+          sizeInBytes = BigInt(1024L),
+          rowCount = Some(BigInt(1L)))
     }
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(

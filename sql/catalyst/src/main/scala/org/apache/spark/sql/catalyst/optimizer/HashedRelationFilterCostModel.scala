@@ -71,8 +71,21 @@ private[sql] object HashedRelationFilterCostModel {
       budget: mutable.Map[Long, Int],
       hasBloomOnSameLineage: Boolean,
       conf: SQLConf): Decision = {
-    val buildRowCount = buildPlan.stats.rowCount.map(_.toLong).getOrElse(Long.MaxValue)
-    val buildSizeInBytes = buildPlan.stats.sizeInBytes.toLong
+    val buildSizeInBytesBig = buildPlan.stats.sizeInBytes
+    val buildRowCountOpt = buildPlan.stats.rowCount.map(_.toLong)
+    // Fail-open on missing build rowCount (CBO off or no column stats): treat
+    // unknown as 0 rows so the MaxBuildSize gate does not silently Skip every
+    // probe site in a CBO-off cluster. Pre-D.5 behaviour was fail-closed
+    // (.getOrElse(Long.MaxValue)), which produced the brick-wall described in
+    // the P2d Stage 5 review F1.6. The downstream canBroadcastBySize gate in
+    // the rule still defends against actually-unboundable builds via the
+    // broadcast threshold.
+    val buildRowCount = buildRowCountOpt.getOrElse(0L)
+    // BigInt.toLong is mod 2^64 with no overflow signal; isValidLong guards
+    // against silent truncation on pathological multiplicative stats estimates
+    // (large fact-table join cardinality x row width).
+    val buildSizeInBytes =
+      if (buildSizeInBytesBig.isValidLong) buildSizeInBytesBig.toLong else Long.MaxValue
     val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
     val maxBuildRows = conf.runtimeFilterHashedRelationContainsMaxBuildSize
     val creationSideThresholdBytes =
@@ -91,9 +104,11 @@ private[sql] object HashedRelationFilterCostModel {
       Skip(s"per-scan-budget-exhausted: anchor=$probeScanAnchor " +
         s"injected=$injectedSoFar limit=$maxFiltersPerScan")
     } else {
-      Inject(s"d5-partial-wire-passed: buildRows=$buildRowCount " +
+      val statsHint = if (buildRowCountOpt.isEmpty) " (build-stats-unavailable)" else ""
+      Inject(s"all-gates-passed: buildRows=$buildRowCount " +
         s"buildBytes=$buildSizeInBytes probeRows=$probeRowCount " +
-        s"anchor=$probeScanAnchor injected=$injectedSoFar/$maxFiltersPerScan")
+        s"anchor=$probeScanAnchor injected=$injectedSoFar/$maxFiltersPerScan" +
+        statsHint)
     }
   }
 
@@ -108,6 +123,11 @@ private[sql] object HashedRelationFilterCostModel {
    * the always-available surrogate.
    */
   def rankBuilds(builds: Seq[LogicalPlan]): Seq[LogicalPlan] = {
-    builds.sortBy(_.stats.sizeInBytes.toLong)
+    builds.sortBy { plan =>
+      val size = plan.stats.sizeInBytes
+      // Match the overflow-guarded conversion in shouldInject so sort ordering
+      // matches gate decisions on the same plans.
+      if (size.isValidLong) size.toLong else Long.MaxValue
+    }
   }
 }
