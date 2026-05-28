@@ -1169,4 +1169,82 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC must not inject on FullOuter join (P2c-3 C.8 SPIP joinType gate)") {
+    // P2c-3 §3 joinType gate, C.8 preserved-side row loss class. FullOuter
+    // preserves rows on BOTH sides (with nulls). Both canPruneLeft(FullOuter)
+    // and canPruneRight(FullOuter) return false (joins.scala:L434-442), so
+    // the gate blocks HRC injection on either probe.
+    //
+    // GREEN-after-fact: covered by the gate landed for C.7 (1b35fb73976).
+    // Anti-regression value: future loosening of the gate must keep FullOuter
+    // blocked.
+    //
+    // Note: Spark currently does not support BroadcastHashJoin for FullOuter
+    // (BHJ only supports Inner/LeftOuter/RightOuter/LeftSemi/LeftAnti per
+    // BroadcastHashJoinExec), so the executed plan will be a
+    // SortMergeJoin/BroadcastNestedLoopJoin. The HRC rule still inspects the
+    // logical plan via ExtractEquiJoinKeys (which wildcard-matches all
+    // joinTypes), so the gate is still the correct guard.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        // Small build, large probe (probe must not be broadcastable so C.5
+        // early-return cannot mask the gate).
+        spark.range(5).toDF("k").createOrReplaceTempView("build")
+        spark.range(50000).toDF("k").createOrReplaceTempView("probe")
+        val sqlStr =
+          "SELECT probe.k AS pk, build.k AS bk " +
+            "FROM probe FULL OUTER JOIN build ON probe.k = build.k"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(r =>
+            (if (r.isNullAt(0)) -1L else r.getLong(0),
+             if (r.isNullAt(1)) -1L else r.getLong(1))).toSet
+        }
+        val withHrc = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr).collect().map(r =>
+            (if (r.isNullAt(0)) -1L else r.getLong(0),
+             if (r.isNullAt(1)) -1L else r.getLong(1))).toSet
+        }
+        val dfDiag = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr)
+        }
+        val optimized = dfDiag.queryExecution.optimizedPlan
+        // Pre-assertion: confirm a FullOuter Join is in the plan.
+        val fullOuterJoins = optimized.collect {
+          case j: org.apache.spark.sql.catalyst.plans.logical.Join
+              if j.joinType == org.apache.spark.sql.catalyst.plans.FullOuter => j
+        }
+        assert(fullOuterJoins.nonEmpty,
+          s"Pre-assertion: expected at least one FullOuter Join in the " +
+            s"optimized plan, but found none.\nPlan:\n${optimized.treeString}")
+        // Anti-regression: HRC must not inject on either probe.
+        val injectedFilters = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injectedFilters.isEmpty,
+          s"HRC must not inject on FullOuter probe (joinType gate blocks " +
+            s"it on both sides), but found ${injectedFilters.size} inject(s)." +
+            s"\nPlan:\n${optimized.treeString}")
+        // Sanity on baseline: FullOuter on probe (50000) and build (5) with
+        // build keys 0..4 (all match probe) keeps all 50000 probe rows; the
+        // 5 matching build rows merge with their probe pairs, so total
+        // distinct (pk, bk) tuples = 50000 (5 matched + 49995 with bk=-1).
+        assert(baseline.size == 50000,
+          s"Baseline (HRC off) FullOuter must have 50000 distinct (pk,bk) " +
+            s"tuples, got ${baseline.size}. Test fixture is wrong.")
+        assert(withHrc == baseline,
+          s"HRC on FullOuter must match HRC off.\n" +
+            s"  baseline (HRC off, size=${baseline.size})\n" +
+            s"  withHrc  (HRC on,  size=${withHrc.size})")
+      }
+    }
+  }
 }
