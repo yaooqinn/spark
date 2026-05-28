@@ -1330,4 +1330,26 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("SparkOptimizer batch order: InjectRuntimeFilter precedes InjectHashedRelationFilters " +
+    "(P2d D.10 Invariant I-Q3-1)") {
+    // D.10: static rule-order sentinel for Invariant I-Q3-1 (Bloom batch must
+    // run before HRC batch so the HRC mutex helper hasBloomOnSameScanLineage
+    // observes already-injected Bloom probes). A future refactor that moves
+    // either batch or interleaves a third filter rule between them would
+    // silently break the always-defer mutex and let HRC stack on top of Bloom,
+    // paying redundant per-row cost. Direct introspection of optimizer batches
+    // catches this at test time without needing a query that exercises the
+    // mutex.
+    val batches = spark.sessionState.optimizer.batches
+    val bloomIdx = batches.indexWhere(_.name == "InjectRuntimeFilter")
+    val hrcIdx = batches.indexWhere(_.name == "InjectHashedRelationFilters")
+    assert(bloomIdx >= 0, "Batch 'InjectRuntimeFilter' must exist in SparkOptimizer.batches")
+    assert(hrcIdx >= 0,
+      "Batch 'InjectHashedRelationFilters' must exist in SparkOptimizer.batches")
+    assert(bloomIdx < hrcIdx,
+      s"Invariant I-Q3-1 violated: InjectRuntimeFilter (idx=$bloomIdx) must precede " +
+        s"InjectHashedRelationFilters (idx=$hrcIdx) so the HRC mutex sees already-injected " +
+        s"Bloom probes. Reordering breaks the always-defer mutex (see 0013 Invariant I-Q3-1).")
+  }
 }
