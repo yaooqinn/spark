@@ -17,32 +17,30 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import scala.collection.mutable
-
 import org.apache.spark.sql.catalyst.dsl.expressions._
-import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.catalyst.plans.PlanTest
+import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
 import org.apache.spark.sql.internal.SQLConf
 
 /**
- * Unit tests for [[HashedRelationFilterCostModel]].
+ * Unit tests for [[HashedRelationFilterCostModel]] gates and ranking.
  *
- * D.0 scope: skeleton object + Decision ADT shape + rankBuilds sort.
- * D.1-D.5 will extend this suite with per-gate Skip tests as the SQLConfs
- * are wired into the production rule (`InjectHashedRelationFilters`).
+ * Cost model is read-only on the per-query `filterCounter`: the caller (rule)
+ * passes the current value, the cost model uses it to decide
+ * `per-query-budget-exhausted`, but never mutates the counter. The caller
+ * increments after a successful inject -- this mirrors the peer
+ * `InjectRuntimeFilter.tryInjectRuntimeFilter` shape.
  */
 class HashedRelationFilterCostModelSuite extends PlanTest {
 
   private val a = $"a".int
   private val b = $"b".int
 
-  private def freshBudget = mutable.Map.empty[Long, Int]
-
   private def plan(rows: Int): LocalRelation = {
     // LocalRelation.computeStats reports rowCount = None by default. Override
     // so tests can isolate gates that depend on rowCount being present
     // (MaxBuildSize / MinApplicationSize). Pass rows = -1 to keep the default
-    // None (used by the build-stats-unavailable Skip test).
+    // None (used by the build-stats-unavailable Inject test).
     if (rows < 0) {
       LocalRelation(a, b)
     } else {
@@ -63,131 +61,93 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, Long.MaxValue)
-    val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, conf)
+      build, probe, filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
       s"Inject expected when stats missing (fail-open), got $decision")
     assert(decision.reason.contains("build-stats-unavailable"),
       s"Inject reason should carry build-stats-unavailable hint, got '${decision.reason}'")
   }
 
-  test("D.2 MaxBuildSize gate: Skip when build rowCount exceeds threshold") {
+  test("MaxBuildSize gate: Skip when build rowCount exceeds threshold") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, 1L)
-    // probe rowCount unset (defaults to 0) would also Skip on MinAppSize, but
-    // build-size check runs first; we drop MinAppSize requirement to isolate.
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
-    val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, conf)
+      build, probe, filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
-      s"Skip expected when build rowCount (Long.MaxValue stub) > 1, got $decision")
+      s"Skip expected when build rowCount > 1, got $decision")
     assert(decision.reason.startsWith("max-build-rows-exceeded:"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
-  test("D.1 MinApplicationSize gate: Skip when probe rowCount below threshold") {
+  test("MinApplicationSize gate: Skip when probe rowCount below threshold") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
-    // LocalRelation stats.rowCount is None -> getOrElse(Long.MaxValue) on build
-    // would trip MaxBuildSize first; opt out to isolate MinAppSize.
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, conf)
+      build, probe, filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
-      s"Skip expected when probe rowCount unset (defaults to 0) < threshold, got $decision")
+      s"Skip expected when probe rowCount < threshold, got $decision")
     assert(decision.reason.startsWith("min-application-rows-not-met:"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
-  test("D.1 MinApplicationSize gate: Skip path does not mutate budget Map") {
+  test("MaxFiltersPerQuery gate: Skip when filterCounter at limit") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
-    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
-    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    val budget = freshBudget
-    HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, conf)
-    assert(budget.isEmpty, s"Skip must not increment budget, but found ${budget.toMap}")
-  }
-
-  test("D.3 MaxFiltersPerScan gate: Skip when budget for this anchor at limit") {
-    val build = plan(100)
-    val probe = plan(10000)
-    val conf = new SQLConf
-    // Isolate D.3: open MinAppSize / MaxBuildSize so they don't Skip first.
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, 2)
-    val budget = freshBudget
-    val anchor = 99L
-    budget(anchor) = 2 // already at cap
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, 2)
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = anchor, budget, conf)
+      build, probe, filterCounter = 2, conf) // already at cap
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
-      s"Skip expected when budget at limit, got $decision")
-    assert(decision.reason.startsWith("per-scan-budget-exhausted:"),
+      s"Skip expected when filterCounter at limit, got $decision")
+    assert(decision.reason.startsWith("per-query-budget-exhausted:"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
-  test("D.3 MaxFiltersPerScan gate: Inject when budget for this anchor below limit") {
+  test("MaxFiltersPerQuery gate: Inject when filterCounter below limit") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, 2)
-    val budget = freshBudget
-    val anchor = 99L
-    budget(anchor) = 1 // below cap
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, 2)
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = anchor, budget, conf)
+      build, probe, filterCounter = 1, conf) // below cap
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
-      s"Inject expected when budget below limit, got $decision")
-    // Cost model is read-only on budget: caller increments post-Inject.
-    assert(budget(anchor) == 1, s"cost-model must not mutate budget, got ${budget.toMap}")
+      s"Inject expected when filterCounter below limit, got $decision")
   }
 
-  test("D.5 CreationSideThreshold gate: Skip when build sizeInBytes exceeds threshold") {
+  test("CreationSideThreshold gate: Skip when build sizeInBytes exceeds threshold") {
     val build = plan(100)
     val probe = plan(10000)
     val conf = new SQLConf
-    // Isolate D.5: open MinAppSize / MaxBuildSize / MaxFiltersPerScan so they
-    // don't Skip first. LocalRelation reports sizeInBytes=0 for empty data
-    // (no row backing) -- use threshold=0 so any non-negative buildBytes
-    // triggers the gate. The gate uses strict `>` so we additionally make
-    // the test stub return a non-zero size by overriding stats below.
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
-    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN, Int.MaxValue)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY, Int.MaxValue)
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, 0L)
-    // Stub a build whose sizeInBytes is provably > 0.
     val sizedBuild = new LocalRelation(Seq(a, b)) {
       override def computeStats(): org.apache.spark.sql.catalyst.plans.logical.Statistics =
         org.apache.spark.sql.catalyst.plans.logical.Statistics(
           sizeInBytes = BigInt(1024L),
           rowCount = Some(BigInt(1L)))
     }
-    val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      sizedBuild, probe, probeScanAnchor = 42L, budget,
-      conf)
+      sizedBuild, probe, filterCounter = 0, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build sizeInBytes > threshold, got $decision")
     assert(decision.reason.startsWith("creation-side-threshold-exceeded:"),
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
-  test("D.0 skeleton: Decision ADT exhaustively pattern-matchable as sealed trait") {
-    // Compiler enforces sealed via -Wunused, but a manual exhaustiveness check
-    // here catches future Decision variants added without updating callers.
+  test("Decision ADT exhaustively pattern-matchable as sealed trait") {
     val decisions: Seq[HashedRelationFilterCostModel.Decision] = Seq(
       HashedRelationFilterCostModel.Inject("test-inject"),
       HashedRelationFilterCostModel.Skip("test-skip"))
@@ -211,16 +171,11 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     assert(ranked.head eq p)
   }
 
-  test("rankBuilds: three-element input sorted by sizeInBytes ascending") {
-    // All three LocalRelations share the same stub-row size; ranking is a
-    // deterministic stable sort, so the original order is preserved when
-    // sizes are equal -- assert the API contract (sortBy stable) rather than
-    // a specific permutation. Real-size discrimination is exercised in
-    // integration test D.7.
+  test("rankBuilds: three-element input is a stable sort by sizeInBytes ascending") {
     val plans = Seq(plan(10), plan(50), plan(20))
     val ranked = HashedRelationFilterCostModel.rankBuilds(plans)
     assert(ranked.size == 3)
-    // All sizes equal -> stable sort preserves order
+    // All sizes equal in the LocalRelation stub -> stable sort preserves order
     assert(ranked == plans)
   }
 }

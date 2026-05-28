@@ -800,14 +800,16 @@ object SQLConf {
       .checkValue(_ >= 0L, "The maximum build size must be >= 0")
       .createWithDefault(1000000L)
 
-  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxFiltersPerScan")
-      .doc("Per-scan cap on the number of HashedRelationContains predicates that may be " +
-        "injected on a single probe scan. Empirically chosen to limit per-row hash cost " +
-        "from outweighing per-filter selectivity gains.")
+  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY =
+    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxFiltersPerQuery")
+      .doc("Per-query cap on the number of HashedRelationContains predicates that may be " +
+        "injected during a single InjectHashedRelationFilters rule invocation. Mirrors " +
+        "the peer RUNTIME_FILTER_NUMBER_THRESHOLD counter used by InjectRuntimeFilter. " +
+        "Empirically chosen to limit per-row hash cost from outweighing per-filter " +
+        "selectivity gains.")
       .version("5.0.0")
       .intConf
-      .checkValue(_ >= 0, "The maximum filters per scan must be >= 0")
+      .checkValue(_ >= 0, "The maximum filters per query must be >= 0")
       .createWithDefault(8)
 
   val RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD =
@@ -7684,8 +7686,8 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
   def runtimeFilterHashedRelationContainsMaxBuildSize: Long =
     getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE)
 
-  def runtimeFilterHashedRelationContainsMaxFiltersPerScan: Int =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_SCAN)
+  def runtimeFilterHashedRelationContainsMaxFiltersPerQuery: Int =
+    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY)
 
   def runtimeFilterHashedRelationContainsCreationSideThreshold: Long =
     getConf(RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD)

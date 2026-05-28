@@ -73,16 +73,17 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
   }
 
   /**
-   * Per-scan inject budget. Fresh per `apply` invocation, not shared across
-   * concurrent queries. Key = `output.head.exprId.id` of the probe-side plan
-   * (`probeScanAnchor`); value = number of HRC filters already injected onto
-   * that scan in this rule invocation.
+   * Per-query inject budget. Mirrors peer
+   * `InjectRuntimeFilter.tryInjectRuntimeFilter` (`var filterCounter` at L282
+   * + `RUNTIME_FILTER_NUMBER_THRESHOLD` at L283): a single counter, scoped to
+   * one `apply` invocation, increments after each successful inject and is
+   * read by the cost-model gate at the next site.
    */
   override def apply(plan: LogicalPlan): LogicalPlan = {
     if (!conf.runtimeFilterHashedRelationContainsEnabled) {
       return plan
     }
-    val budget = scala.collection.mutable.Map.empty[Long, Int]
+    var filterCounter = 0
     plan.transformWithPruning(_.containsPattern(JOIN)) {
       case j @ ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, left, right, hint)
           if leftKeys.size == rightKeys.size && leftKeys.nonEmpty =>
@@ -92,26 +93,35 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
         // where dropping rows on the corresponding side would change the answer
         // (e.g. LeftAnti, FullOuter, ExistenceJoin, NullAwareAntiJoin). Without
         // this gate the HRC predicate "key IN broadcast" silently drops rows
-        // that LeftAnti is supposed to keep -- see P2c-3 C.7 RED for the
-        // silently-wrong P0 evidence.
+        // that LeftAnti is supposed to keep.
         // Try the right side as build (probe filter applied on the left).
-        val withLeftProbe = if (canPruneLeft(joinType)) {
-          maybeInjectProbe(j, leftKeys, rightKeys, left, right, buildIsRight = true, budget)
+        val (afterLeft, leftInjected) = if (canPruneLeft(joinType)) {
+          maybeInjectProbe(j, leftKeys, rightKeys, left, right,
+            buildIsRight = true, filterCounter)
         } else {
-          j
+          (j: LogicalPlan, false)
         }
+        if (leftInjected) filterCounter += 1
         // Then try the left side as build (probe filter applied on the right) on the
         // possibly-rewritten join. We re-extract because the join structure may have
         // changed if the first inject site succeeded.
-        withLeftProbe match {
+        afterLeft match {
           case j2 @ ExtractEquiJoinKeys(jt2, lk2, rk2, _, _, l2, r2, _)
               if lk2.size == rk2.size && lk2.nonEmpty && canPruneRight(jt2) =>
-            maybeInjectProbe(j2, rk2, lk2, r2, l2, buildIsRight = false, budget)
+            val (afterRight, rightInjected) =
+              maybeInjectProbe(j2, rk2, lk2, r2, l2,
+                buildIsRight = false, filterCounter)
+            if (rightInjected) filterCounter += 1
+            afterRight
           case other => other
         }
     }
   }
 
+  /**
+   * Returns `(possibly-rewritten plan, didInject)`. Caller is responsible for
+   * incrementing the per-query `filterCounter` when `didInject = true`.
+   */
   private def maybeInjectProbe(
       join: Join,
       probeKeys: Seq[Expression],
@@ -119,29 +129,14 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       probePlan: LogicalPlan,
       buildPlan: LogicalPlan,
       buildIsRight: Boolean,
-      budget: scala.collection.mutable.Map[Long, Int]): LogicalPlan = {
-    if (!canBroadcastBySize(buildPlan, conf)) return join
-    if (canBroadcastBySize(probePlan, conf)) return join
-    // D.3 cost-model gates: MinApplicationSize + MaxBuildSize + MaxFiltersPerScan.
-    // CreationSideThreshold / Bloom mutex will route through the cost model in
-    // D.4-D.5. probeScanAnchor uses the probe-side `output.head.exprId.id`
-    // (Q4 anchor lock, see JIRA SPARK-XXXXX section 5); the budget Map is owned
-    // by `apply` (fresh per rule invocation, not shared across queries).
-    val probeScanAnchor = if (probePlan.output.nonEmpty) {
-      probePlan.output.head.exprId.id
-    } else {
-      // Defensive fallback: empty-output plans (e.g. constant-folded
-      // LocalRelation()) are rare for join probe sides post-analysis, but the
-      // literal-0L fallback would silently collide across distinct empty
-      // probes. semanticHash gives per-plan-shape uniqueness without requiring
-      // output.nonEmpty.
-      probePlan.semanticHash().toLong
-    }
+      filterCounter: Int): (LogicalPlan, Boolean) = {
+    if (!canBroadcastBySize(buildPlan, conf)) return (join, false)
+    if (canBroadcastBySize(probePlan, conf)) return (join, false)
     HashedRelationFilterCostModel.shouldInject(
-      buildPlan, probePlan, probeScanAnchor, budget, conf) match {
+      buildPlan, probePlan, filterCounter, conf) match {
       case skip: HashedRelationFilterCostModel.Skip =>
         logDebug(s"HRC cost-model Skip: ${skip.reason}")
-        return join
+        return (join, false)
       case _: HashedRelationFilterCostModel.Inject => // continue
     }
     // Skip HRC inject when the probe side already carries a Bloom filter on
@@ -149,7 +144,7 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
     // already covers the same membership check, and stacking both runtime
     // filters on the same broadcast pays redundant per-row cost.
     if (hasBloomOnSameScanLineage(probePlan, probeKeys)) {
-      return join
+      return (join, false)
     }
     // Avoid re-injecting on a probe plan that already contains the same HRC subquery
     // for this build-key set (idempotence under FixedPoint(1) re-trigger).
@@ -162,7 +157,7 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       }
       case _ => false
     }) {
-      return join
+      return (join, false)
     }
     val subquery = HashedRelationContainsSubquery(
       pruningKeys = probeKeys,
@@ -170,13 +165,11 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildKeys = buildKeys,
       broadcastKeyIndices = buildKeys.indices)
     val newProbe = Filter(subquery, probePlan)
-    // Post-Inject: increment per-scan budget so subsequent candidates on the
-    // same probe scan respect MaxFiltersPerScan.
-    budget(probeScanAnchor) = budget.getOrElse(probeScanAnchor, 0) + 1
-    if (buildIsRight) {
+    val newJoin = if (buildIsRight) {
       join.copy(left = newProbe)
     } else {
       join.copy(right = newProbe)
     }
+    (newJoin, true)
   }
 }

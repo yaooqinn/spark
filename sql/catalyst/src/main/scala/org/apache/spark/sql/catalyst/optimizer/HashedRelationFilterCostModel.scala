@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import scala.collection.mutable
-
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.internal.SQLConf
 
@@ -47,16 +45,17 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * D.5 partial wire -- MinApplicationSize + MaxBuildSize + MaxFiltersPerScan
-   * + CreationSideThreshold gates. D.6 batch will extend with the Bloom mutex
-   * check per JIRA SPARK-XXXXX section 5.
+   * Cost-model gates: MinApplicationSize + MaxBuildSize + MaxFiltersPerQuery
+   * + CreationSideThreshold. Bloom mutex check is performed by the caller after
+   * a positive decision (see InjectHashedRelationFilters).
    *
-   * Per-scan budget: the caller passes `probeScanAnchor` (the
-   * `output.head.exprId.id` of the probe-side leaf scan) and a mutable `budget`
-   * Map shared across all `shouldInject` calls within a single rule invocation.
-   * When the budget for this anchor has reached `maxFiltersPerScan`, the
-   * decision is `Skip("per-scan-budget-exhausted")`. The caller increments the
-   * budget after a successful inject (cost-model is read-only on budget).
+   * Per-query budget: the caller passes the current `filterCounter` and the
+   * configured `maxFiltersPerQuery` cap. This mirrors peer
+   * `InjectRuntimeFilter.tryInjectRuntimeFilter` L282 (`var filterCounter`)
+   * + L283 (`RUNTIME_FILTER_NUMBER_THRESHOLD`). When the counter has reached
+   * the cap, the decision is `Skip("per-query-budget-exhausted")`. The caller
+   * increments after a successful inject; cost-model is read-only on the
+   * counter.
    *
    * CreationSideThreshold is checked on `buildPlan.stats.sizeInBytes` (bytes),
    * distinct from MaxBuildSize which gates on `stats.rowCount` (rows). The two
@@ -67,18 +66,16 @@ private[sql] object HashedRelationFilterCostModel {
   def shouldInject(
       buildPlan: LogicalPlan,
       probePlan: LogicalPlan,
-      probeScanAnchor: Long,
-      budget: mutable.Map[Long, Int],
+      filterCounter: Int,
       conf: SQLConf): Decision = {
     val buildSizeInBytesBig = buildPlan.stats.sizeInBytes
     val buildRowCountOpt = buildPlan.stats.rowCount.map(_.toLong)
     // Fail-open on missing build rowCount (CBO off or no column stats): treat
     // unknown as 0 rows so the MaxBuildSize gate does not silently Skip every
-    // probe site in a CBO-off cluster. Pre-D.5 behaviour was fail-closed
-    // (.getOrElse(Long.MaxValue)), which produced the brick-wall described in
-    // the P2d Stage 5 review F1.6. The downstream canBroadcastBySize gate in
-    // the rule still defends against actually-unboundable builds via the
-    // broadcast threshold.
+    // probe site in a CBO-off cluster. Pre-fix behaviour was fail-closed
+    // (.getOrElse(Long.MaxValue)), which produced a brick-wall on default
+    // parquet scans. The downstream canBroadcastBySize gate in the rule still
+    // defends against actually-unboundable builds via the broadcast threshold.
     val buildRowCount = buildRowCountOpt.getOrElse(0L)
     // BigInt.toLong is mod 2^64 with no overflow signal; isValidLong guards
     // against silent truncation on pathological multiplicative stats estimates
@@ -90,8 +87,7 @@ private[sql] object HashedRelationFilterCostModel {
     val creationSideThresholdBytes =
       conf.runtimeFilterHashedRelationContainsCreationSideThreshold
     val minAppRows = conf.runtimeFilterHashedRelationContainsMinApplicationSize
-    val maxFiltersPerScan = conf.runtimeFilterHashedRelationContainsMaxFiltersPerScan
-    val injectedSoFar = budget.getOrElse(probeScanAnchor, 0)
+    val maxFiltersPerQuery = conf.runtimeFilterHashedRelationContainsMaxFiltersPerQuery
     if (buildRowCount > maxBuildRows) {
       Skip(s"max-build-rows-exceeded: $buildRowCount > $maxBuildRows")
     } else if (buildSizeInBytes > creationSideThresholdBytes) {
@@ -99,22 +95,22 @@ private[sql] object HashedRelationFilterCostModel {
         s"$creationSideThresholdBytes bytes")
     } else if (probeRowCount < minAppRows) {
       Skip(s"min-application-rows-not-met: $probeRowCount < $minAppRows")
-    } else if (injectedSoFar >= maxFiltersPerScan) {
-      Skip(s"per-scan-budget-exhausted: anchor=$probeScanAnchor " +
-        s"injected=$injectedSoFar limit=$maxFiltersPerScan")
+    } else if (filterCounter >= maxFiltersPerQuery) {
+      Skip(s"per-query-budget-exhausted: " +
+        s"injected=$filterCounter limit=$maxFiltersPerQuery")
     } else {
       val statsHint = if (buildRowCountOpt.isEmpty) " (build-stats-unavailable)" else ""
       Inject(s"all-gates-passed: buildRows=$buildRowCount " +
         s"buildBytes=$buildSizeInBytes probeRows=$probeRowCount " +
-        s"anchor=$probeScanAnchor injected=$injectedSoFar/$maxFiltersPerScan" +
+        s"injected=$filterCounter/$maxFiltersPerQuery" +
         statsHint)
     }
   }
 
   /**
    * Rank candidate builds by size ascending (smaller broadcast = cheaper). Used
-   * when a single probe scan has multiple candidate HRC injections competing
-   * for the `maxFiltersPerScan` budget.
+   * when multiple candidate HRC injections compete for the
+   * `maxFiltersPerQuery` budget.
    *
    * Note: SPIP section 6.2 proposes a selectivity formula
    * `1 - buildSize/domainCardinality`, which requires `ColumnStat.distinctCount`
