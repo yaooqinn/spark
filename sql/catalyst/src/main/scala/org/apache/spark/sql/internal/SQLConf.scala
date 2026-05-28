@@ -804,9 +804,7 @@ object SQLConf {
     buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxFiltersPerQuery")
       .doc("Per-query cap on the number of HashedRelationContains predicates that may be " +
         "injected during a single InjectHashedRelationFilters rule invocation. Mirrors " +
-        "the peer RUNTIME_FILTER_NUMBER_THRESHOLD counter used by InjectRuntimeFilter. " +
-        "Empirically chosen to limit per-row hash cost from outweighing per-filter " +
-        "selectivity gains.")
+        "RUNTIME_FILTER_NUMBER_THRESHOLD used by InjectRuntimeFilter.")
       .version("5.0.0")
       .intConf
       .checkValue(_ >= 0, "The maximum filters per query must be >= 0")
