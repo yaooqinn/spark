@@ -135,7 +135,9 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
     HashedRelationFilterCostModel.shouldInject(
       buildPlan, probePlan, probeScanAnchor, budget,
       hasBloomOnSameLineage = false, conf) match {
-      case _: HashedRelationFilterCostModel.Skip => return join
+      case skip: HashedRelationFilterCostModel.Skip =>
+        logDebug(s"HRC cost-model Skip: ${skip.reason}")
+        return join
       case _: HashedRelationFilterCostModel.Inject => // continue
     }
     // Skip HRC inject when the probe side already carries a Bloom filter on
