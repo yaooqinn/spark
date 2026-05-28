@@ -1098,4 +1098,75 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC must not inject on LeftOuter join (P2c-3 C.6 SPIP joinType gate)") {
+    // P2c-3 §3 joinType gate, C.6 preserved-side row loss class. LeftOuter
+    // keeps every left row (with nulls for non-matches). canPruneLeft(LeftOuter)
+    // returns false in JoinSelectionHelper (joins.scala:L434-442), so the
+    // gate blocks HRC injection on the left probe; canPruneRight(LeftOuter)
+    // is true, which would allow injection on a right probe -- but
+    // BROADCAST(build_on_right) keeps the build on the right, so the rule
+    // only attempts the buildIsRight=true branch and the gate fires.
+    //
+    // GREEN-after-fact: the canPruneLeft/canPruneRight gate landed in
+    // InjectHashedRelationFilters.apply for C.7 also covers LeftOuter.
+    // C.6 stays as anti-regression: any future change that loosens the
+    // joinType gate must preserve the LeftOuter block.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        // build keys 0..4 (broadcastable). probe rows 0..49999 (not
+        // broadcastable: avoids C.5 early-return masking the gate).
+        // LeftOuter(probe, build) keeps all 50000 probe rows: rows 0..4
+        // match build, rows 5..49999 get null on the build side.
+        spark.range(5).toDF("k").createOrReplaceTempView("build")
+        spark.range(50000).toDF("k").createOrReplaceTempView("probe")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(build) */ probe.k, build.k AS bk " +
+            "FROM probe LEFT OUTER JOIN build ON probe.k = build.k"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(r => (r.getLong(0), if (r.isNullAt(1)) -1L else r.getLong(1))).toSet
+        }
+        val withHrc = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr).collect().map(r => (r.getLong(0), if (r.isNullAt(1)) -1L else r.getLong(1))).toSet
+        }
+        val dfDiag = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr)
+        }
+        val optimized = dfDiag.queryExecution.optimizedPlan
+        // Pre-assertion: confirm a Join with LeftOuter joinType is in the plan
+        // (otherwise this RED vacuous-passes via some unexpected rewrite).
+        val leftOuterJoins = optimized.collect {
+          case j: org.apache.spark.sql.catalyst.plans.logical.Join
+              if j.joinType == org.apache.spark.sql.catalyst.plans.LeftOuter => j
+        }
+        assert(leftOuterJoins.nonEmpty,
+          s"Pre-assertion: expected at least one LeftOuter Join in the " +
+            s"optimized plan, but found none.\nPlan:\n${optimized.treeString}")
+        // Anti-regression: HRC must not inject on the LeftOuter probe.
+        val injectedFilters = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injectedFilters.isEmpty,
+          s"HRC must not inject on LeftOuter probe (joinType gate blocks " +
+            s"it), but found ${injectedFilters.size} inject(s).\nPlan:\n" +
+            s"${optimized.treeString}")
+        // Sanity on baseline: all 50000 probe rows present.
+        assert(baseline.size == 50000,
+          s"Baseline (HRC off) LeftOuter must keep all 50000 probe rows, " +
+            s"got ${baseline.size}. Test fixture is wrong.")
+        assert(withHrc == baseline,
+          s"HRC on LeftOuter must match HRC off.\n" +
+            s"  baseline (HRC off, size=${baseline.size})\n" +
+            s"  withHrc  (HRC on,  size=${withHrc.size})")
+      }
+    }
+  }
 }
