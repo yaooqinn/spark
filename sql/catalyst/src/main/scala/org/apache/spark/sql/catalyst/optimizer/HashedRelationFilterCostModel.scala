@@ -45,9 +45,15 @@ private[sql] object HashedRelationFilterCostModel {
   final case class Skip(reason: String) extends Decision
 
   /**
-   * Cost-model gates: MinApplicationSize + MaxBuildSize + MaxFiltersPerQuery
-   * + CreationSideThreshold. Bloom mutex check is performed by the caller after
-   * a positive decision (see InjectHashedRelationFilters).
+   * Cost-model gates: broadcastability + MinApplicationSize + MaxBuildSize +
+   * MaxFiltersPerQuery + CreationSideThreshold. Bloom mutex check is performed
+   * by the caller after a positive decision (see InjectHashedRelationFilters).
+   *
+   * Broadcastability is decided by the caller (via `JoinSelectionHelper`
+   * `canBroadcastBySize`) and passed in as two booleans so the cost-model
+   * stays an object-with-no-mixin and can log explicit Skip reasons
+   * (`build-not-broadcastable` / `probe-broadcastable`) instead of being
+   * silently short-circuited upstream.
    *
    * Per-query budget: the caller passes the current `filterCounter` and the
    * configured `maxFiltersPerQuery` cap. This mirrors peer
@@ -66,8 +72,16 @@ private[sql] object HashedRelationFilterCostModel {
   def shouldInject(
       buildPlan: LogicalPlan,
       probePlan: LogicalPlan,
+      buildBroadcastable: Boolean,
+      probeBroadcastable: Boolean,
       filterCounter: Int,
       conf: SQLConf): Decision = {
+    if (!buildBroadcastable) {
+      return Skip("build-not-broadcastable")
+    }
+    if (probeBroadcastable) {
+      return Skip("probe-broadcastable")
+    }
     val buildSizeInBytesBig = buildPlan.stats.sizeInBytes
     val buildRowCountOpt = buildPlan.stats.rowCount.map(_.toLong)
     // Fail-open on missing build rowCount (CBO off or no column stats): treat

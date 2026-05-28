@@ -130,10 +130,12 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
       buildPlan: LogicalPlan,
       buildIsRight: Boolean,
       filterCounter: Int): (LogicalPlan, Boolean) = {
-    if (!canBroadcastBySize(buildPlan, conf)) return (join, false)
-    if (canBroadcastBySize(probePlan, conf)) return (join, false)
+    val buildBroadcastable = canBroadcastBySize(buildPlan, conf)
+    val probeBroadcastable = canBroadcastBySize(probePlan, conf)
     HashedRelationFilterCostModel.shouldInject(
-      buildPlan, probePlan, filterCounter, conf) match {
+      buildPlan, probePlan,
+      buildBroadcastable, probeBroadcastable,
+      filterCounter, conf) match {
       case skip: HashedRelationFilterCostModel.Skip =>
         logDebug(s"HRC cost-model Skip: ${skip.reason}")
         return (join, false)
