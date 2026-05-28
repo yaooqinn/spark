@@ -1017,4 +1017,85 @@ class InjectHashedRelationFiltersSuite extends SharedSparkSession
       }
     }
   }
+
+  test("HRC must not inject on ExistenceJoin (P2c-3 C.9 SPIP joinType gate, silent P0)") {
+    // P2c-3 §3 joinType gate bug, C.9 silent-P0 severity (peer to C.7).
+    // ExistenceJoin is produced by RewritePredicateSubquery when an EXISTS
+    // subquery appears in a disjunctive predicate (e.g. `x = lit OR EXISTS`),
+    // because the existence flag must be projected before evaluating the OR.
+    // Without a joinType gate, HRC injection on the probe side would silently
+    // change the existence-flag rowset because canPruneLeft/canPruneRight
+    // return false for ExistenceJoin (`case _ => false` at joins.scala:L434-442),
+    // and the HRC predicate is not an existence-preserving filter.
+    //
+    // r16 audit B1: this RED requires an explicit pre-assertion that the
+    // optimized plan really contains a Join whose joinType is ExistenceJoin,
+    // otherwise the test would vacuous-pass when the subquery rewrites to
+    // LeftSemi (the common case) and never hits the joinType gate.
+    //
+    // After §3 prod fix (canPruneLeft/canPruneRight gate landed in
+    // InjectHashedRelationFilters.apply), HRC must not inject on this probe.
+    // Both this assertion and the checkAnswer parity below should hold.
+    withSQLConf(
+      SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "5000",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "false",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+      withTempView("build", "probe") {
+        // build keys 0..4 (broadcastable). probe rows 0..49999 (not
+        // broadcastable: avoids C.5 early-return masking the gate).
+        spark.range(5).toDF("k").createOrReplaceTempView("build")
+        spark.range(50000).toDF("k").createOrReplaceTempView("probe")
+        // `WHERE probe.k = 999999 OR EXISTS(...)` forces an ExistenceJoin
+        // (RewritePredicateSubquery cannot turn this into a LeftSemi because
+        // the existence flag participates in the OR).
+        val sqlStr =
+          "SELECT probe.k FROM probe WHERE probe.k = 999999 " +
+            "OR EXISTS (SELECT /*+ BROADCAST(build) */ 1 FROM build " +
+            "WHERE build.k = probe.k)"
+        val baseline = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "false") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val withHrc = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr).collect().map(_.getLong(0)).toSet
+        }
+        val dfDiag = withSQLConf(
+          SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_ENABLED.key -> "true") {
+          spark.sql(sqlStr)
+        }
+        val optimized = dfDiag.queryExecution.optimizedPlan
+        // r16 B1 pre-assertion: confirm the optimized plan actually contains
+        // a Join with ExistenceJoin joinType. If this fails, the subquery
+        // was rewritten to LeftSemi (or eliminated), and the gate below
+        // would never have been exercised: vacuous-pass.
+        val existenceJoins = optimized.collect {
+          case j: org.apache.spark.sql.catalyst.plans.logical.Join
+              if j.joinType.isInstanceOf[
+                org.apache.spark.sql.catalyst.plans.ExistenceJoin] => j
+        }
+        assert(existenceJoins.nonEmpty,
+          s"r16 B1 pre-assertion: expected at least one ExistenceJoin node " +
+            s"in the optimized plan (otherwise C.9 vacuous-passes via " +
+            s"LeftSemi rewrite), but found none.\nPlan:\n${optimized.treeString}")
+        // Anti-regression: HRC must not inject on the ExistenceJoin probe.
+        val injectedFilters = optimized.collect {
+          case f: Filter if f.condition.find(_.isInstanceOf[HashedRelationContainsSubquery])
+            .isDefined => f
+        }
+        assert(injectedFilters.isEmpty,
+          s"HRC must not inject on ExistenceJoin probe (joinType gate blocks " +
+            s"it), but found ${injectedFilters.size} inject(s).\nPlan:\n" +
+            s"${optimized.treeString}")
+        // Behavior parity: HRC on vs off produces the same row set.
+        assert(withHrc == baseline,
+          s"HRC on ExistenceJoin must match HRC off.\n" +
+            s"  baseline (HRC off, size=${baseline.size}): " +
+            s"${baseline.toSeq.sorted.take(20)}...\n" +
+            s"  withHrc  (HRC on,  size=${withHrc.size}):  " +
+            s"${withHrc.toSeq.sorted.take(20)}...")
+      }
+    }
+  }
 }
