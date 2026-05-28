@@ -69,7 +69,6 @@ private[sql] object HashedRelationFilterCostModel {
       probePlan: LogicalPlan,
       probeScanAnchor: Long,
       budget: mutable.Map[Long, Int],
-      hasBloomOnSameLineage: Boolean,
       conf: SQLConf): Decision = {
     val buildSizeInBytesBig = buildPlan.stats.sizeInBytes
     val buildRowCountOpt = buildPlan.stats.rowCount.map(_.toLong)

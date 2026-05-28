@@ -130,11 +130,15 @@ object InjectHashedRelationFilters extends Rule[LogicalPlan] with PredicateHelpe
     val probeScanAnchor = if (probePlan.output.nonEmpty) {
       probePlan.output.head.exprId.id
     } else {
-      0L
+      // Defensive fallback: empty-output plans (e.g. constant-folded
+      // LocalRelation()) are rare for join probe sides post-analysis, but the
+      // literal-0L fallback would silently collide across distinct empty
+      // probes. semanticHash gives per-plan-shape uniqueness without requiring
+      // output.nonEmpty.
+      probePlan.semanticHash().toLong
     }
     HashedRelationFilterCostModel.shouldInject(
-      buildPlan, probePlan, probeScanAnchor, budget,
-      hasBloomOnSameLineage = false, conf) match {
+      buildPlan, probePlan, probeScanAnchor, budget, conf) match {
       case skip: HashedRelationFilterCostModel.Skip =>
         logDebug(s"HRC cost-model Skip: ${skip.reason}")
         return join

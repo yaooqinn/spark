@@ -65,7 +65,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD, Long.MaxValue)
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = 42L, budget, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
       s"Inject expected when stats missing (fail-open), got $decision")
     assert(decision.reason.contains("build-stats-unavailable"),
@@ -82,7 +82,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 0L)
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = 42L, budget, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build rowCount (Long.MaxValue stub) > 1, got $decision")
     assert(decision.reason.startsWith("max-build-rows-exceeded:"),
@@ -99,7 +99,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = 42L, budget, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when probe rowCount unset (defaults to 0) < threshold, got $decision")
     assert(decision.reason.startsWith("min-application-rows-not-met:"),
@@ -114,7 +114,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
     val budget = freshBudget
     HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = 42L, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = 42L, budget, conf)
     assert(budget.isEmpty, s"Skip must not increment budget, but found ${budget.toMap}")
   }
 
@@ -130,7 +130,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val anchor = 99L
     budget(anchor) = 2 // already at cap
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = anchor, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = anchor, budget, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when budget at limit, got $decision")
     assert(decision.reason.startsWith("per-scan-budget-exhausted:"),
@@ -148,7 +148,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val anchor = 99L
     budget(anchor) = 1 // below cap
     val decision = HashedRelationFilterCostModel.shouldInject(
-      build, probe, probeScanAnchor = anchor, budget, hasBloomOnSameLineage = false, conf)
+      build, probe, probeScanAnchor = anchor, budget, conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
       s"Inject expected when budget below limit, got $decision")
     // Cost model is read-only on budget: caller increments post-Inject.
@@ -178,7 +178,7 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
     val budget = freshBudget
     val decision = HashedRelationFilterCostModel.shouldInject(
       sizedBuild, probe, probeScanAnchor = 42L, budget,
-      hasBloomOnSameLineage = false, conf)
+      conf)
     assert(decision.isInstanceOf[HashedRelationFilterCostModel.Skip],
       s"Skip expected when build sizeInBytes > threshold, got $decision")
     assert(decision.reason.startsWith("creation-side-threshold-exceeded:"),
