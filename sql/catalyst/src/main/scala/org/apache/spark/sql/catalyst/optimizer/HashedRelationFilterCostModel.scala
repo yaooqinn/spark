@@ -89,12 +89,14 @@ private[sql] object HashedRelationFilterCostModel {
     // pathological multiplicative stats estimates from silent truncation.
     val buildSizeInBytes =
       if (buildSizeInBytesBig.isValidLong) buildSizeInBytesBig.toLong else Long.MaxValue
-    // probe rowCount missing -> fail-open (treat as 0). Asymmetric with build:
-    // a missing build rowCount means "don't know how big the broadcast is" and
-    // we let it through; a missing probe rowCount means "don't know if the
-    // probe is large enough to be worth filtering" and we likewise let it
-    // through. Both choices favor injecting when stats are absent.
-    val probeRowCount = probePlan.stats.rowCount.map(_.toLong).getOrElse(0L)
+    // probe rowCount missing -> fail-open (skip the minApplicationSize gate).
+    // Asymmetric with maxBuildSize: a missing build rowCount means "don't know
+    // how big the broadcast is" and we let it through; a missing probe rowCount
+    // means "don't know if the probe is large enough to be worth filtering"
+    // and we likewise let it through. Both choices favor injecting when stats
+    // are absent, consistent with `LogicalPlan.stats.rowCount` being
+    // frequently None pre-CBO (SPARK-21043 / SPARK-30269).
+    val probeRowCountOpt = probePlan.stats.rowCount.map(_.toLong)
     val maxBuildRows = conf.runtimeFilterHashedRelationContainsMaxBuildSize
     val creationSideThresholdBytes =
       conf.runtimeFilterHashedRelationContainsCreationSideThreshold
@@ -104,15 +106,21 @@ private[sql] object HashedRelationFilterCostModel {
     } else if (buildSizeInBytes > creationSideThresholdBytes) {
       Skip(s"$CreationSideThresholdExceeded: $buildSizeInBytes > " +
         s"$creationSideThresholdBytes bytes")
-    } else if (probeRowCount < minAppRows) {
-      Skip(s"$MinApplicationRowsNotMet: $probeRowCount < $minAppRows")
+    } else if (probeRowCountOpt.exists(_ < minAppRows)) {
+      Skip(s"$MinApplicationRowsNotMet: ${probeRowCountOpt.get} < $minAppRows")
     } else {
       // Lazy-build the Inject reason only if the caller asks for it. logDebug
       // already evaluates lazily, but the caller (rule) typically discards the
       // reason on Inject and we save the string concat.
-      val statsHint = if (buildRowCountOpt.isEmpty) " (build-stats-unavailable)" else ""
+      val probeStatsHint = probeRowCountOpt match {
+        case Some(n) => n.toString
+        case None => "?"
+      }
+      val statsHint =
+        (if (buildRowCountOpt.isEmpty) " (build-stats-unavailable)" else "") +
+        (if (probeRowCountOpt.isEmpty) " (probe-stats-unavailable)" else "")
       Inject(s"all-gates-passed: buildRows=$buildRowCount " +
-        s"buildBytes=$buildSizeInBytes probeRows=$probeRowCount " +
+        s"buildBytes=$buildSizeInBytes probeRows=$probeStatsHint " +
         s"injected=$filterCounter/$maxFiltersPerQuery$statsHint")
     }
   }

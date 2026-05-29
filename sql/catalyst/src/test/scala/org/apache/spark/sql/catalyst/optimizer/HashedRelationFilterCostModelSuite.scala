@@ -101,6 +101,28 @@ class HashedRelationFilterCostModelSuite extends PlanTest {
       s"reason prefix mismatch, got '${decision.reason}'")
   }
 
+  test("MinApplicationSize gate: Inject when probe rowCount is missing " +
+    "(fail-open, peer-parity with build rowCount fail-open)") {
+    // Regression test for the pre-fail-open bug where probe.stats.rowCount = None
+    // was coerced to 0L and then compared `< minApplicationSize`, causing the
+    // gate to always Skip pre-CBO. Verified 2026-05-29 on SF100 TPC-DS spike:
+    // q11/q13/q14a/q14b/q23a/q24a/q31/q47/q57/q72/q74/q76 all 0-inject in HRC=on
+    // because every probe stats.rowCount returned None at logical-plan time.
+    val build = plan(100)
+    val probe = planWithoutStats() // rowCount = None
+    val conf = new SQLConf
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE, 1000000L)
+    conf.setConf(SQLConf.RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE, Long.MaxValue)
+    val decision = HashedRelationFilterCostModel.shouldInject(
+      build, probe,
+      buildBroadcastable = true, probeBroadcastable = false,
+      filterCounter = 0, conf)
+    assert(decision.isInstanceOf[HashedRelationFilterCostModel.Inject],
+      s"Inject expected when probe rowCount is None (fail-open), got $decision")
+    assert(decision.reason.contains("probe-stats-unavailable"),
+      s"Inject reason should disclose stats unavailability, got '${decision.reason}'")
+  }
+
   test("MaxFiltersPerQuery gate: Skip when filterCounter at limit") {
     val build = plan(100)
     val probe = plan(10000)
