@@ -17,9 +17,13 @@
 
 package org.apache.spark.sql.execution.adaptive
 
-import org.apache.spark.sql.catalyst.expressions.{BindReferences, Literal, NamedExpression}
-import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
+import scala.annotation.tailrec
+
+import org.apache.spark.sql.catalyst.expressions.{AttributeSet, BindReferences, BloomFilterMightContain, DynamicPruningExpression, Expression, Literal, NamedExpression, XxHash64}
+import org.apache.spark.sql.catalyst.expressions.PredicateHelper
+import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, JoinSelectionHelper}
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashedRelationBroadcastMode, HashJoin}
@@ -89,6 +93,164 @@ case class PlanAdaptiveHashedRelationContainsFilters(
           // BroadcastExchangeExec here (would defeat HRC's raison d'etre).
           Literal.TrueLiteral
         }
+    }
+  }
+}
+
+/**
+ * Companion holding SparkPlan-typed BloomFilter helpers ported from
+ * `org.apache.spark.sql.catalyst.optimizer.InjectRuntimeFilter` for use by
+ * the AQE-only HRC rule body rewrite (E2). Helpers are `private[adaptive]`
+ * for direct access from the rule, exposed via `private[sql]` object so the
+ * unit suite (same package) can call them.
+ *
+ * Shape parity with the LogicalPlan versions is intentional. Node-type
+ * substitutions:
+ *   - Project / Filter (logical) -> ProjectExec / FilterExec
+ *   - LogicalRelation / leaf -> LeafExecNode (uses logicalLink.get.stats)
+ *   - DynamicPruningSubquery -> DynamicPruningExpression
+ *
+ * Join transitive-key recursion from the original (ExtractEquiJoinKeys
+ * branch) is NOT ported in E1: at AQE post-stage time, join children are
+ * typically `QueryStageExec` (leaf-like for scan walks). E2 revisits if a
+ * benchmark demands cross-join key chasing.
+ */
+private[sql] object PlanAdaptiveHashedRelationContainsFilters
+    extends JoinSelectionHelper with PredicateHelper {
+
+  private def isSimpleExpression(e: Expression): Boolean = {
+    !e.containsAnyPattern(PYTHON_UDF, SCALA_UDF, INVOKE, JSON_TO_STRUCT, LIKE_FAMLIY,
+      REGEXP_EXTRACT_FAMILY, REGEXP_REPLACE)
+  }
+
+  /**
+   * SparkPlan-typed port of `InjectRuntimeFilter.extractSelectiveFilterOverScan`.
+   * Walks the SparkPlan down through ProjectExec/FilterExec looking for a
+   * selective filter sitting above a leaf scan. Returns the (rewritten key,
+   * leaf plan) pair on success.
+   */
+  private[adaptive] def extractSelectiveFilterOverScanExec(
+      plan: SparkPlan,
+      filterCreationSideKey: Expression): Option[(Expression, SparkPlan)] = {
+    def extract(
+        p: SparkPlan,
+        predicateReference: AttributeSet,
+        hasHitFilter: Boolean,
+        hasHitSelectiveFilter: Boolean,
+        currentPlan: SparkPlan,
+        targetKey: Expression): Option[(Expression, SparkPlan)] = p match {
+      case ProjectExec(projectList, child) if hasHitFilter =>
+        val referencedExprs = projectList.filter(predicateReference.contains)
+        if (referencedExprs.forall(isSimpleExpression)) {
+          extract(
+            child,
+            referencedExprs.map(_.references).foldLeft(AttributeSet.empty)(_ ++ _),
+            hasHitFilter,
+            hasHitSelectiveFilter,
+            currentPlan,
+            targetKey)
+        } else {
+          None
+        }
+      case ProjectExec(_, child) =>
+        assert(predicateReference.isEmpty && !hasHitSelectiveFilter)
+        extract(child, predicateReference, hasHitFilter, hasHitSelectiveFilter, currentPlan,
+          targetKey)
+      case FilterExec(condition, child) if isSimpleExpression(condition) =>
+        extract(
+          child,
+          predicateReference ++ condition.references,
+          hasHitFilter = true,
+          hasHitSelectiveFilter = hasHitSelectiveFilter || isLikelySelective(condition),
+          currentPlan,
+          targetKey)
+      case wsc: WholeStageCodegenExec =>
+        extract(wsc.child, predicateReference, hasHitFilter, hasHitSelectiveFilter,
+          currentPlan, targetKey)
+      case _: InputAdapter =>
+        extract(p.children.head, predicateReference, hasHitFilter, hasHitSelectiveFilter,
+          currentPlan, targetKey)
+      case leaf: LeafExecNode if hasHitSelectiveFilter =>
+        Some((targetKey, currentPlan))
+      case _ => None
+    }
+    extract(plan, AttributeSet.empty, hasHitFilter = false, hasHitSelectiveFilter = false,
+      currentPlan = plan, targetKey = filterCreationSideKey)
+  }
+
+  // Returns max scan size in bytes within the subtree, mirroring
+  // InjectRuntimeFilter.maxScanByteSize on SparkPlan leaves via logicalLink.
+  private def maxScanByteSizeExec(filterApplicationSide: SparkPlan): BigInt = {
+    val defaultSizeInBytes = SQLConf.get.getConf(SQLConf.DEFAULT_SIZE_IN_BYTES)
+    val leaves = filterApplicationSide.collect { case leaf: LeafExecNode => leaf }
+    if (leaves.isEmpty) {
+      BigInt(0)
+    } else {
+      leaves.map { leaf =>
+        val sz = leaf.logicalLink.map(_.stats.sizeInBytes).getOrElse(BigInt(defaultSizeInBytes))
+        if (sz == defaultSizeInBytes) BigInt(0) else sz
+      }.max
+    }
+  }
+
+  /**
+   * SparkPlan-typed port of `InjectRuntimeFilter.satisfyByteSizeRequirement`.
+   * True iff max leaf scan byte size meets the BF application-side threshold.
+   */
+  private[adaptive] def satisfyByteSizeRequirementExec(
+      filterApplicationSide: SparkPlan): Boolean = {
+    val maxScanSize = maxScanByteSizeExec(filterApplicationSide)
+    maxScanSize >=
+      SQLConf.get.getConf(SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD)
+  }
+
+  /**
+   * SparkPlan-typed port of `InjectRuntimeFilter.hasDynamicPruningSubquery`.
+   * True iff any FilterExec on either subtree references the matching key
+   * via a `DynamicPruningExpression`.
+   */
+  @tailrec
+  private[adaptive] def hasDynamicPruningSubqueryExec(
+      left: SparkPlan,
+      right: SparkPlan,
+      leftKey: Expression,
+      rightKey: Expression): Boolean = {
+    def dppKeyOnTop(p: SparkPlan): Option[(Expression, SparkPlan)] = p match {
+      case FilterExec(cond, child) =>
+        splitConjunctivePredicates(cond).collectFirst {
+          case DynamicPruningExpression(_) => (cond, child)
+        }
+      case _ => None
+    }
+    (dppKeyOnTop(left), dppKeyOnTop(right)) match {
+      case (Some((cond, child)), _) if cond.references.exists(_.fastEquals(leftKey)) ||
+          cond.fastEquals(leftKey) =>
+        true
+      case (Some((_, child)), _) =>
+        hasDynamicPruningSubqueryExec(child, right, leftKey, rightKey)
+      case (_, Some((cond, child))) if cond.references.exists(_.fastEquals(rightKey)) ||
+          cond.fastEquals(rightKey) =>
+        true
+      case (_, Some((_, child))) =>
+        hasDynamicPruningSubqueryExec(left, child, leftKey, rightKey)
+      case _ => false
+    }
+  }
+
+  /**
+   * SparkPlan-typed port of `InjectRuntimeFilter.hasBloomFilter`. True iff a
+   * `BloomFilterMightContain` keyed on `XxHash64(Seq(key))` already sits in
+   * any FilterExec in the subtree.
+   */
+  private[adaptive] def hasBloomFilterExec(plan: SparkPlan, key: Expression): Boolean = {
+    plan.exists {
+      case FilterExec(condition, _) =>
+        splitConjunctivePredicates(condition).exists {
+          case BloomFilterMightContain(_, XxHash64(Seq(valueExpression), _))
+              if valueExpression.fastEquals(key) => true
+          case _ => false
+        }
+      case _ => false
     }
   }
 }
