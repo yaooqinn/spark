@@ -781,55 +781,6 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
-  val RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.minApplicationSize")
-      .doc("Skip HashedRelationContains injection when the probe-side estimated row count " +
-        "is below this value. Prevents subquery-setup overhead from dwarfing tiny-probe wins.")
-      .version("5.0.0")
-      .longConf
-      .checkValue(_ >= 0L, "The minimum application size must be >= 0")
-      .createWithDefault(10000L)
-
-  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxBuildSize")
-      .doc("Skip HashedRelationContains injection when the broadcast build-side row count " +
-        "exceeds this value. Above this size, the Bloom filter (smaller per-row cost) wins " +
-        "the cost model.")
-      .version("5.0.0")
-      .longConf
-      .checkValue(_ >= 0L, "The maximum build size must be >= 0")
-      .createWithDefault(1000000L)
-
-  val RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.maxFiltersPerQuery")
-      .doc("Per-query cap on the number of HashedRelationContains predicates that may be " +
-        "injected during a single InjectHashedRelationFilters rule invocation. Mirrors " +
-        "RUNTIME_FILTER_NUMBER_THRESHOLD used by InjectRuntimeFilter.")
-      .version("5.0.0")
-      .intConf
-      .checkValue(_ >= 0, "The maximum filters per query must be >= 0")
-      .createWithDefault(8)
-
-  val RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.creationSideThreshold")
-      .doc("Size threshold (in bytes) of the HashedRelationContains creation side plan. " +
-        "Estimated size needs to be under this value to try to inject the filter. Mirrors " +
-        "the Bloom-filter creation-side threshold to keep build-side broadcast cheap.")
-      .version("5.0.0")
-      .bytesConf(ByteUnit.BYTE)
-      .createWithDefaultString("10MB")
-
-  val RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION =
-    buildConf("spark.sql.optimizer.runtime.hashedRelationContains.costModel.bloomMutualExclusion")
-      .doc("When true, the HashedRelationContains (HRC) inject rule skips its " +
-        "own injection on probe sites where a runtime Bloom filter has already " +
-        "been injected on overlapping scan lineage, to avoid two runtime filters " +
-        "doing redundant work over the same broadcast. Setting this to false " +
-        "lets HRC and the Bloom filter coexist on the same site.")
-      .version("5.0.0")
-      .booleanConf
-      .createWithDefault(true)
-
   val RUNTIME_ROW_LEVEL_OPERATION_GROUP_FILTER_ENABLED =
     buildConf("spark.sql.optimizer.runtime.rowLevelOperationGroupFilter.enabled")
       .doc("Enables runtime filtering for group-based and delta-based row-level operations. " +
@@ -7677,21 +7628,6 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
 
   def runtimeFilterHashedRelationContainsEnabled: Boolean =
     getConf(RUNTIME_HASHED_RELATION_CONTAINS_ENABLED)
-
-  def runtimeFilterHashedRelationContainsMinApplicationSize: Long =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MIN_APPLICATION_SIZE)
-
-  def runtimeFilterHashedRelationContainsMaxBuildSize: Long =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_BUILD_SIZE)
-
-  def runtimeFilterHashedRelationContainsMaxFiltersPerQuery: Int =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_MAX_FILTERS_PER_QUERY)
-
-  def runtimeFilterHashedRelationContainsCreationSideThreshold: Long =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_CREATION_SIDE_THRESHOLD)
-
-  def runtimeFilterHashedRelationContainsBloomMutualExclusion: Boolean =
-    getConf(RUNTIME_HASHED_RELATION_CONTAINS_BLOOM_MUTUAL_EXCLUSION)
 
   def runtimeRowLevelOperationGroupFilterEnabled: Boolean =
     getConf(RUNTIME_ROW_LEVEL_OPERATION_GROUP_FILTER_ENABLED)

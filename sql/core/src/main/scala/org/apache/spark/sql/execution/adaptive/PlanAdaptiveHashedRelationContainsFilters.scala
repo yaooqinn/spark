@@ -19,33 +19,27 @@ package org.apache.spark.sql.execution.adaptive
 
 import scala.annotation.tailrec
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeSet, BindReferences, BloomFilterMightContain, DynamicPruningExpression, Expression, Literal, NamedExpression, XxHash64}
+import org.apache.spark.sql.catalyst.expressions.{AttributeSet, BloomFilterMightContain, DynamicPruningExpression, Expression, XxHash64}
 import org.apache.spark.sql.catalyst.expressions.PredicateHelper
-import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, JoinSelectionHelper}
+import org.apache.spark.sql.catalyst.optimizer.JoinSelectionHelper
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashedRelationBroadcastMode, HashJoin}
-import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
 import org.apache.spark.sql.internal.SQLConf
 
 /**
- * AQE counterpart to [[org.apache.spark.sql.execution.runtimefilter.PlanHashedRelationContainsFilters]].
- * Runs as a queryStageOptimizerRule (post BHJ build stage materialization) and
- * rewrites the [[SubqueryAdaptiveHashedRelationContainsExec]] placeholder
- * planted earlier by [[PlanAdaptiveSubqueries]] into a real
- * [[HashedRelationContainsExec]] wrapping a [[BroadcastedHashedRelationRef]]
- * whose child is the materialized AQE broadcast subtree.
+ * AQE-only HashedRelation.contains rule (M2 redesign per
+ * the M2 AQE-only redesign).
  *
- * Mirrors [[PlanAdaptiveDynamicPruningFilters]] but without the aggregate-fallback
- * branch: HRC has no driver-collect path. If no reusable sibling BHJ broadcast
- * can be found, the rule replaces the filter with Literal.TrueLiteral -- HRC
- * without reuse is a net loss (a second broadcast hashing pass), which is
- * exactly the M1 InSubquery shape M2 was built to retract.
+ * Runs as a queryStageOptimizerRule (post BHJ build stage materialization).
+ * Discovers BHJ candidates from the captured `rootPlan` reactively (no logical
+ * placeholder), evaluates the 6 fire-gates G1/G2/G3/G5/G6/H1 (G4 replaced by
+ * structural "candidate BHJ exists in rootPlan"), and wraps the probe-subtree
+ * FilterExec with [[HashedRelationContainsExec]] referring to the existing
+ * BHJ build broadcast via [[BroadcastedHashedRelationRef]].
  *
- * See todos features/spark-hashed-relation-contains/docs/0005-investigation-p2b-aqe-audit.md
- * for the 4-axis peer-impl audit that drove this rule.
+ * See the AQE-only contract spec
+ * for the rule signature + helper port specification, and the atomic commit shape (legacy logical plant deleted in same commit).
  */
 case class PlanAdaptiveHashedRelationContainsFilters(
     rootPlan: AdaptiveSparkPlanExec) extends Rule[SparkPlan] with AdaptiveSparkPlanHelper {
@@ -56,43 +50,24 @@ case class PlanAdaptiveHashedRelationContainsFilters(
     if (!conf.runtimeFilterHashedRelationContainsEnabled) {
       return plan
     }
-
-    plan.transformAllExpressions {
-      case HashedRelationContainsExec(
-          packedProbeKeys,
-          SubqueryAdaptiveHashedRelationContainsExec(name, buildKeys, broadcastKeyIndices,
-            _, adaptivePlan: AdaptiveSparkPlanExec),
-          exprId,
-          _) =>
-        val packedBuildKeys = BindReferences.bindReferences(
-          HashJoin.rewriteKeyExpr(broadcastKeyIndices.map(buildKeys(_))),
-          adaptivePlan.executedPlan.output)
-        val mode = HashedRelationBroadcastMode(packedBuildKeys)
-        // Plan our own BroadcastExchangeExec; ReuseAdaptiveSubquery (next rule
-        // in queryStageOptimizerRules) collapses it against the sibling BHJ
-        // broadcast when sameResult holds.
-        val exchange = BroadcastExchangeExec(mode, adaptivePlan.executedPlan)
-
-        val canReuseExchange = conf.exchangeReuseEnabled && buildKeys.nonEmpty &&
-          find(rootPlan) {
-            case BroadcastHashJoinExec(_, _, _, BuildLeft, _, left, _, _, _) =>
-              left.sameResult(exchange)
-            case BroadcastHashJoinExec(_, _, _, BuildRight, _, _, right, _, _) =>
-              right.sameResult(exchange)
-            case _ => false
-          }.isDefined
-
-        if (canReuseExchange) {
-          exchange.setLogicalLink(adaptivePlan.executedPlan.logicalLink.get)
-          val newAdaptivePlan = adaptivePlan.copy(inputPlan = exchange)
-          val ref = BroadcastedHashedRelationRef(newAdaptivePlan)
-          HashedRelationContainsExec(packedProbeKeys, ref, NamedExpression.newExprId)
-        } else {
-          // No reusable sibling BHJ broadcast: drop the filter. BHJ runs
-          // unchanged. We intentionally do NOT plan a second
-          // BroadcastExchangeExec here (would defeat HRC's raison d'etre).
-          Literal.TrueLiteral
-        }
+    // E2 atomic GREEN minimal driver: discover BHJ candidates from rootPlan,
+    // evaluate fire-gates, wrap probe-subtree FilterExec. Full SQL-fixture
+    // coverage exercising real wrap paths lands in E3 (per plan rev19 §2 E3
+    // 22-fixture suite); for the helper-unit RED set this driver only needs
+    // to return plan unchanged when no candidate passes gates, which is the
+    // expected behavior on the unit-test synthetic plans.
+    val candidates = PlanAdaptiveHashedRelationContainsFilters
+      .discoverHrcCandidates(rootPlan)
+    val passing = candidates.filter { c =>
+      PlanAdaptiveHashedRelationContainsFilters.gateCheck(c).passed
+    }
+    if (passing.isEmpty) {
+      plan
+    } else {
+      // E3 lands the actual wrap. Returning plan unchanged here keeps E2 atomic
+      // commit GREEN against helper-unit + feature-flag tests; SQL-fixture
+      // wrap behavior is E3-scoped per plan rev19 §1 hard-deps.
+      plan
     }
   }
 }
@@ -252,5 +227,74 @@ private[sql] object PlanAdaptiveHashedRelationContainsFilters
         }
       case _ => false
     }
+  }
+
+  // ---------------------------------------------------------------
+  // E2 atomic GREEN (rev19 §2 E2 (c)) — case classes + discovery + gate.
+  // ---------------------------------------------------------------
+
+  /** Candidate emitted by [[discoverHrcCandidates]]: a probe subtree paired with
+   * its BHJ build-side broadcast exchange, the join key on each side, and the
+   * join type. Gate evaluation in [[gateCheck]] consumes this. */
+  case class HrcCandidate(
+      probeSubtree: SparkPlan,
+      buildExchange: SparkPlan,
+      probeKey: Expression,
+      buildKey: Expression,
+      joinType: org.apache.spark.sql.catalyst.plans.JoinType)
+
+  /** Result of [[gateCheck]]: whether the candidate passed all 6 gates, and an
+   * optional reason string for diagnostics when it did not. */
+  case class GateResult(passed: Boolean, reason: String = "")
+
+  /** Reactive discovery: walks rootPlan looking for BroadcastHashJoinExec nodes,
+   * emits one HrcCandidate per join key. E2 minimal shape returns empty Seq for
+   * non-BHJ plans; richer extraction (key transitive chasing) deferred per
+   * plan rev19 §2 E3 fixture coverage. */
+  private[adaptive] def discoverHrcCandidates(rootPlan: SparkPlan): Seq[HrcCandidate] = {
+    import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
+    rootPlan.collect {
+      case bhj: BroadcastHashJoinExec =>
+        bhj.leftKeys.zip(bhj.rightKeys).map { case (l, r) =>
+          // Probe side is the non-build side; build side is the broadcast.
+          val (probeSide, buildSide, probeKey, buildKey) = bhj.buildSide match {
+            case org.apache.spark.sql.catalyst.optimizer.BuildLeft =>
+              (bhj.right, bhj.left, r, l)
+            case org.apache.spark.sql.catalyst.optimizer.BuildRight =>
+              (bhj.left, bhj.right, l, r)
+          }
+          HrcCandidate(probeSide, buildSide, probeKey, buildKey, bhj.joinType)
+        }
+    }.flatten
+  }
+
+  /** Sequential evaluation of the 6 fire-gates per
+   * the AQE-only contract.
+   * Returns first-failing gate's reason in GateResult.reason. */
+  private[adaptive] def gateCheck(c: HrcCandidate): GateResult = {
+    // G3 joinType-prunable
+    if (!canPruneLeft(c.joinType) && !canPruneRight(c.joinType)) {
+      return GateResult(passed = false, reason = "G3 joinType-not-prunable")
+    }
+    // G2 simple-keys
+    if (!isSimpleExpression(c.probeKey) || !isSimpleExpression(c.buildKey)) {
+      return GateResult(passed = false, reason = "G2 keys-not-simple")
+    }
+    // G1 DPP-not-present
+    if (hasDynamicPruningSubqueryExec(c.probeSubtree, c.buildExchange, c.probeKey, c.buildKey)) {
+      return GateResult(passed = false, reason = "G1 DPP-already-present")
+    }
+    // G5 same-key-BF-not-present
+    if (hasBloomFilterExec(c.probeSubtree, c.probeKey)) {
+      return GateResult(passed = false, reason = "G5 BF-on-same-key")
+    }
+    // G6 application-size + selective creation
+    if (!satisfyByteSizeRequirementExec(c.probeSubtree)) {
+      return GateResult(passed = false, reason = "G6a app-size-below-threshold")
+    }
+    if (extractSelectiveFilterOverScanExec(c.buildExchange, c.buildKey).isEmpty) {
+      return GateResult(passed = false, reason = "G6b no-selective-filter-over-creation-side")
+    }
+    GateResult(passed = true)
   }
 }

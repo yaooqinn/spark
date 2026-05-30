@@ -37,8 +37,8 @@ import org.apache.spark.sql.execution.joins.HashedRelation
  * features/spark-hashed-relation-contains/docs/0002-decision.md §M1->M2 pivot).
  *
  * The actual probe-side rewrite (BroadcastExchangeExec wrapping + sameResult reuse
- * with the BHJ broadcast) lands in PlanHashedRelationContainsFilters per the next
- * implementation slice.
+ * with the BHJ broadcast) lands in PlanAdaptiveHashedRelationContainsFilters
+ * (AQE-only post E2 atomic redesign).
  *
  * @param child must be a BroadcastExchangeExec (or an AdaptiveSparkPlan wrapping one)
  *              that produces a HashedRelation broadcast

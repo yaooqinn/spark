@@ -51,7 +51,6 @@ import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Utils, Transac
 import org.apache.spark.sql.execution.dynamicpruning.PlanDynamicPruningFilters
 import org.apache.spark.sql.execution.exchange.EnsureRequirements
 import org.apache.spark.sql.execution.reuse.ReuseExchangeAndSubquery
-import org.apache.spark.sql.execution.runtimefilter.PlanHashedRelationContainsFilters
 import org.apache.spark.sql.execution.streaming.checkpointing.OffsetSeqMetadata
 import org.apache.spark.sql.execution.streaming.runtime.{IncrementalExecution, WatermarkPropagator}
 import org.apache.spark.sql.internal.SQLConf
@@ -798,7 +797,6 @@ object QueryExecution {
     Seq(
       CoalesceBucketsInJoin,
       PlanDynamicPruningFilters(sparkSession),
-      PlanHashedRelationContainsFilters(sparkSession),
       PlanSubqueries(sparkSession),
       RemoveRedundantProjects,
       EnsureRequirements(),

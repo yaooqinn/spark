@@ -58,7 +58,6 @@ object TreePattern extends Enumeration  {
   val FUNCTION_TABLE_RELATION_ARGUMENT_EXPRESSION: Value = Value
   val GENERATOR: Value = Value
   val GROUPING_ANALYTICS: Value = Value
-  val HASHED_RELATION_CONTAINS_SUBQUERY: Value = Value
   val HIGH_ORDER_FUNCTION: Value = Value
   val IF: Value = Value
   val IN: Value = Value

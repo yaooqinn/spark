@@ -43,7 +43,7 @@ import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
  * expression for the packed-Long fast path (sum of IntegralType key widths
  * <= 8B), or stays as the original Seq for the UnsafeRow fallback path.
  * The build side is packed via the SAME helper at the SAME call site in
- * PlanHashedRelationContainsFilters / PlanAdaptiveHashedRelationContainsFilters
+ * PlanAdaptiveHashedRelationContainsFilters (AQE-only post E2 atomic redesign)
  * so build/probe shapes are byte-for-byte aligned (matches BHJ's own
  * build/probe use of rewriteKeyExpr at HashJoin.scala line 133 / 136).
  *
