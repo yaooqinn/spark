@@ -19,12 +19,14 @@ package org.apache.spark.sql.execution.adaptive
 
 import scala.annotation.tailrec
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeSet, BloomFilterMightContain, DynamicPruningExpression, Expression, XxHash64}
+import org.apache.spark.sql.catalyst.expressions.{AttributeSet, BloomFilterMightContain, DynamicPruningExpression, Expression, NamedExpression, XxHash64}
 import org.apache.spark.sql.catalyst.expressions.PredicateHelper
-import org.apache.spark.sql.catalyst.optimizer.JoinSelectionHelper
+import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, JoinSelectionHelper}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashJoin}
+import org.apache.spark.sql.execution.runtimefilter.{BroadcastedHashedRelationRef, HashedRelationContainsExec}
 import org.apache.spark.sql.internal.SQLConf
 
 /**
@@ -50,24 +52,9 @@ case class PlanAdaptiveHashedRelationContainsFilters(
     if (!conf.runtimeFilterHashedRelationContainsEnabled) {
       return plan
     }
-    // E2 atomic GREEN minimal driver: discover BHJ candidates from rootPlan,
-    // evaluate fire-gates, wrap probe-subtree FilterExec. Full SQL-fixture
-    // coverage exercising real wrap paths lands in E3 (per plan rev19 §2 E3
-    // 22-fixture suite); for the helper-unit RED set this driver only needs
-    // to return plan unchanged when no candidate passes gates, which is the
-    // expected behavior on the unit-test synthetic plans.
-    val candidates = PlanAdaptiveHashedRelationContainsFilters
-      .discoverHrcCandidates(rootPlan)
-    val passing = candidates.filter { c =>
-      PlanAdaptiveHashedRelationContainsFilters.gateCheck(c).passed
-    }
-    if (passing.isEmpty) {
-      plan
-    } else {
-      // E3 lands the actual wrap. Returning plan unchanged here keeps E2 atomic
-      // commit GREEN against helper-unit + feature-flag tests; SQL-fixture
-      // wrap behavior is E3-scoped per plan rev19 §1 hard-deps.
-      plan
+    plan.transform {
+      case bhj: BroadcastHashJoinExec =>
+        PlanAdaptiveHashedRelationContainsFilters.maybeWrapStreamedSide(bhj)
     }
   }
 }
@@ -288,13 +275,81 @@ private[sql] object PlanAdaptiveHashedRelationContainsFilters
     if (hasBloomFilterExec(c.probeSubtree, c.probeKey)) {
       return GateResult(passed = false, reason = "G5 BF-on-same-key")
     }
-    // G6 application-size + selective creation
-    if (!satisfyByteSizeRequirementExec(c.probeSubtree)) {
+    // G6 application-size + selective creation (HRC-adapted)
+    // G6a: probe-subtree scan-size threshold (mirror BF gate; unwrap query
+    // stages so descend below BroadcastQueryStageExec / ShuffleQueryStageExec).
+    if (!satisfyByteSizeRequirementExec(unwrapQueryStages(c.probeSubtree))) {
       return GateResult(passed = false, reason = "G6a app-size-below-threshold")
     }
-    if (extractSelectiveFilterOverScanExec(c.buildExchange, c.buildKey).isEmpty) {
-      return GateResult(passed = false, reason = "G6b no-selective-filter-over-creation-side")
-    }
+    // G6b (BF-shape "selective filter over creation side") is dropped for HRC:
+    // the creation side IS the BHJ build broadcast, already known to be small
+    // (broadcast threshold gate elsewhere). Selectivity of build's own filter
+    // is irrelevant to HRC inject benefit; the gate is a port artifact from
+    // InjectRuntimeFilter where creation side = probe scan.
     GateResult(passed = true)
+  }
+
+  /** Unwrap QueryStageExec wrappers (BroadcastQueryStageExec /
+   * ShuffleQueryStageExec / ResultQueryStageExec) and ReusedExchangeExec to
+   * expose the underlying scan tree for byte-size / scan-walk gates. */
+  private def unwrapQueryStages(plan: SparkPlan): SparkPlan = plan match {
+    case qs: QueryStageExec => unwrapQueryStages(qs.plan)
+    case _ => plan
+  }
+
+  /**
+   * Reactive wrap: given a freshly-encountered BroadcastHashJoinExec whose
+   * build side is a materialized BroadcastQueryStageExec (or any
+   * BroadcastExchangeLike), evaluate fire-gates and (if all pass) wrap the
+   * streamed side with FilterExec(HashedRelationContainsExec). Returns the
+   * original BHJ unchanged when any gate fails or wrap is unsafe.
+   *
+   * The HRC node holds a [[BroadcastedHashedRelationRef]] over the BHJ's own
+   * build-side exchange, so the broadcast is shared (no second materialization);
+   * this is the AQE-only invariant that motivated the M2 redesign.
+   */
+  private[adaptive] def maybeWrapStreamedSide(bhj: BroadcastHashJoinExec): SparkPlan = {
+    // Single-key shape only in E3: composite key support deferred (per plan
+    // rev19 §2 E3 -- multi-key probe-side key packing duplicates the BHJ
+    // own packing and is a follow-up batch).
+    if (bhj.leftKeys.size != 1 || bhj.rightKeys.size != 1) return bhj
+    val (probeSide, buildSide, probeKey, buildKey) = bhj.buildSide match {
+      case BuildLeft => (bhj.right, bhj.left, bhj.rightKeys.head, bhj.leftKeys.head)
+      case BuildRight => (bhj.left, bhj.right, bhj.leftKeys.head, bhj.rightKeys.head)
+    }
+    // Idempotence guard: if the streamed side is already wrapped with HRC for
+    // this key, do not wrap again. AQE may re-apply queryStageOptimizerRules
+    // across stages; this keeps the rule a fixed-point.
+    if (alreadyWrappedHrc(probeSide)) return bhj
+    val candidate = HrcCandidate(probeSide, buildSide, probeKey, buildKey, bhj.joinType)
+    val gate = gateCheck(candidate)
+    if (!gate.passed) return bhj
+
+    // The build side at this point in AQE rewrite is either a
+    // BroadcastQueryStageExec (post-materialization) or a BroadcastExchangeExec
+    // (pre-materialization, on the first apply pass before stage submission).
+    // BroadcastedHashedRelationRef accepts either: its .broadcast accessor
+    // forwards .executeBroadcast to child, which both shapes support.
+    val ref = BroadcastedHashedRelationRef(buildSide)
+    val packedProbeKey = HashJoin.rewriteKeyExpr(Seq(probeKey)) match {
+      case Seq(packed) => packed
+      case other => other.head // multi-key shape unreachable here (single-key gate above)
+    }
+    val hrc = HashedRelationContainsExec(
+      packedProbeKeys = Seq(packedProbeKey),
+      plan = ref,
+      exprId = NamedExpression.newExprId)
+    val wrapped = FilterExec(hrc, probeSide)
+
+    bhj.buildSide match {
+      case BuildLeft => bhj.copy(right = wrapped)
+      case BuildRight => bhj.copy(left = wrapped)
+    }
+  }
+
+  private def alreadyWrappedHrc(probe: SparkPlan): Boolean = probe match {
+    case FilterExec(cond, _) =>
+      splitConjunctivePredicates(cond).exists(_.isInstanceOf[HashedRelationContainsExec])
+    case _ => false
   }
 }
