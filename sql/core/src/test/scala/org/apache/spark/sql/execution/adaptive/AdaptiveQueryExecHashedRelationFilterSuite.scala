@@ -222,4 +222,40 @@ class AdaptiveQueryExecHashedRelationFilterSuite extends QueryTest
       }
     }
   }
+
+  // ---------------------------------------------------------------
+  // E4: rule-slot regression lock.
+  // ---------------------------------------------------------------
+  // Guards against regression of the postStageCreationRules slot move
+  // (commit 66f48afa0d7, see docs/0018-investigation-aqe-rule-slot-architectural-gap.md).
+  // If PADPF is ever moved back to queryStageOptimizerRules, the BHJ
+  // sits in a downstream stage and the rule observes 0 BHJs, so this
+  // test would observe 0 HRC injections and fail.
+  //
+  // Shape: range(probe) JOIN range(build) + COUNT(*) forces a partial-aggregate
+  // shuffle BELOW the BHJ. The final stage contains HashAggregate over a
+  // shuffle input; the BHJ lives in the upstream stage's plan tree, which is
+  // exactly what queryStageOptimizerRules cannot see but postStageCreationRules can.
+  test("E4.slot-regression HRC fires when BHJ is in non-final stage (multi-stage shape)") {
+    withSQLConf(hrcOn: _*) {
+      withTempView("build", "probe") {
+        spark.range(8).toDF("k").createOrReplaceTempView("build")
+        spark.range(10000).toDF("k").createOrReplaceTempView("probe")
+        val sqlStr =
+          "SELECT /*+ BROADCAST(build) */ COUNT(*) FROM probe JOIN build ON probe.k = build.k"
+        val df = spark.sql(sqlStr)
+        df.collect()
+        val exec = df.queryExecution.executedPlan
+        val hrcExecs = collectWithSubqueries(exec) { sp =>
+          sp.expressions.flatMap(_.collect { case h: HashedRelationContainsExec => h })
+        }.flatten
+        assert(hrcExecs.nonEmpty,
+          "Expected HashedRelationContainsExec when BHJ is in a non-final stage " +
+            "(partial-agg shuffle below BHJ). If 0 HRCExecs observed, " +
+            "PADPF rule slot was likely reverted to queryStageOptimizerRules. " +
+            s"See docs/0018-investigation-aqe-rule-slot-architectural-gap.md.\nPlan:\n" +
+            exec.treeString)
+      }
+    }
+  }
 }
