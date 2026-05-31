@@ -136,7 +136,6 @@ case class AdaptiveSparkPlanExec(
   // optimizations should be stage-independent.
   @transient private val queryStageOptimizerRules: Seq[Rule[SparkPlan]] = Seq(
     PlanAdaptiveDynamicPruningFilters(this),
-    PlanAdaptiveHashedRelationContainsFilters(this),
     ReuseAdaptiveSubquery(context.subqueryCache),
     OptimizeSkewInRebalancePartitions,
     CoalesceShufflePartitions(context.session),
@@ -153,6 +152,14 @@ case class AdaptiveSparkPlanExec(
   // A list of physical optimizer rules to be applied right after a new stage is created. The input
   // plan to these rules has exchange as its root node.
   private def postStageCreationRules(outputsColumnar: Boolean) = Seq(
+    // HRC must run AFTER queryStageOptimizerRules + columnar transitions because
+    // BroadcastHashJoinExec only becomes visible at post-stage time (after the
+    // build BroadcastQueryStage materializes and gets injected into the plan).
+    // Running it at queryStageOptimizerRules slot misses every BHJ since that
+    // slot sees the input-to-stage plan (typically scan/shuffle/agg root), not
+    // the final BHJ-containing tree. See features/spark-hashed-relation-contains/
+    // docs/0018-investigation-aqe-rule-slot-architectural-gap.md.
+    PlanAdaptiveHashedRelationContainsFilters(this),
     ApplyColumnarRulesAndInsertTransitions(
       context.session.sessionState.columnarRules, outputsColumnar),
     collapseCodegenStagesRule
