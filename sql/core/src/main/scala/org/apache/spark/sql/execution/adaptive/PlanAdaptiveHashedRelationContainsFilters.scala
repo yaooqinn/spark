@@ -275,17 +275,25 @@ private[sql] object PlanAdaptiveHashedRelationContainsFilters
     if (hasBloomFilterExec(c.probeSubtree, c.probeKey)) {
       return GateResult(passed = false, reason = "G5 BF-on-same-key")
     }
-    // G6 application-size + selective creation (HRC-adapted)
-    // G6a: probe-subtree scan-size threshold (mirror BF gate; unwrap query
-    // stages so descend below BroadcastQueryStageExec / ShuffleQueryStageExec).
-    if (!satisfyByteSizeRequirementExec(unwrapQueryStages(c.probeSubtree))) {
-      return GateResult(passed = false, reason = "G6a app-size-below-threshold")
-    }
-    // G6b (BF-shape "selective filter over creation side") is dropped for HRC:
-    // the creation side IS the BHJ build broadcast, already known to be small
-    // (broadcast threshold gate elsewhere). Selectivity of build's own filter
-    // is irrelevant to HRC inject benefit; the gate is a port artifact from
-    // InjectRuntimeFilter where creation side = probe scan.
+    // G6 application-size gate (HRC-adapted).
+    //
+    // In AQE post-stage time the BHJ build broadcast has already passed the
+    // autoBroadcastJoinThreshold gate, so the BHJ itself is a structural
+    // guarantee of "small build, large probe worth filtering". HRC wrap
+    // overhead is one hash-lookup per probe row against an already-materialized
+    // HashedRelation (no extra build, unlike Bloom filter), so the BF-derived
+    // probe-scan-size threshold (RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD,
+    // default 10GB) does not apply to HRC: most TPC-DS BHJ probes have logical
+    // sizeInBytes that AQE has rewritten down through prior joins to either
+    // small intermediate estimates or the default 1GB sentinel (which the BF
+    // helper deliberately treats as 0 -- correct for BF, wrong for HRC).
+    //
+    // We therefore drop G6a for HRC. The skip mirrors the G6b drop above and
+    // is design-correct: if the BHJ exists post-stage, HRC wrap is cheaper than
+    // a fresh BF inject, and the gate it would replicate (BHJ broadcast
+    // threshold) already fired upstream.
+    // G6a (deprecated for HRC, preserved as design comment):
+    //   if (!satisfyByteSizeRequirementExec(unwrapQueryStages(c.probeSubtree))) ...
     GateResult(passed = true)
   }
 
