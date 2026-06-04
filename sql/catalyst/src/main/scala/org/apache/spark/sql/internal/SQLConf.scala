@@ -677,6 +677,48 @@ object SQLConf {
       .booleanConf
       .createWithDefault(true)
 
+  val DYNAMIC_FILE_PRUNING_ENABLED =
+    buildConf("spark.sql.optimizer.dynamicFilePruning.enabled")
+      .doc("When true, the optimizer will inject a runtime filter derived from a " +
+        "BroadcastHashJoin's build-side key set into the stream-side Parquet scan, " +
+        "so that files whose footer min/max prove no build key matches can be " +
+        "skipped at task-scheduling time. Complements partition-level dynamic " +
+        "pruning by handling non-partition data columns. SPARK-44662.")
+      .version("4.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  val DYNAMIC_FILE_PRUNING_MAX_BUILD_ROWS =
+    buildConf("spark.sql.optimizer.dynamicFilePruning.maxBuildSizeRows")
+      .doc("When dynamic file pruning is enabled, the rule does not fire if the " +
+        "broadcast build side would contain more keys than this threshold. " +
+        "Above this size, the per-file in-list check cost outweighs the I/O " +
+        "savings on typical layouts.")
+      .version("4.2.0")
+      .intConf
+      .checkValue(_ > 0, "must be positive")
+      .createWithDefault(10000)
+
+  val DYNAMIC_FILE_PRUNING_MIN_FILE_SIZE_BYTES =
+    buildConf("spark.sql.optimizer.dynamicFilePruning.minFileSizeBytes")
+      .doc("When dynamic file pruning is enabled, files smaller than this size " +
+        "are not considered for footer-based pruning. Avoids per-file overhead " +
+        "exceeding I/O savings on small-file layouts.")
+      .version("4.2.0")
+      .bytesConf(ByteUnit.BYTE)
+      .createWithDefaultString("1m")
+
+  val DYNAMIC_FILE_PRUNING_MAX_PRUNE_TIME_MS =
+    buildConf("spark.sql.optimizer.dynamicFilePruning.maxPruneTimeMillis")
+      .doc("Cumulative per-scan budget for dynamic file pruning's per-file " +
+        "footer-read and in-list check. If the cumulative time exceeds this " +
+        "budget, remaining files skip the check and are kept unconditionally.")
+      .version("4.2.0")
+      .longConf
+      .checkValue(_ > 0, "must be positive")
+      .createWithDefault(5000)
+
+
   val DYNAMIC_PARTITION_PRUNING_USE_STATS =
     buildConf("spark.sql.optimizer.dynamicPartitionPruning.useStats")
       .internal()
@@ -7626,6 +7668,14 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
   def dataSourceV2JoinPushdown: Boolean = getConf(DATA_SOURCE_V2_JOIN_PUSHDOWN)
 
   def dynamicPartitionPruningEnabled: Boolean = getConf(DYNAMIC_PARTITION_PRUNING_ENABLED)
+
+  def dynamicFilePruningEnabled: Boolean = getConf(DYNAMIC_FILE_PRUNING_ENABLED)
+
+  def dynamicFilePruningMaxBuildRows: Int = getConf(DYNAMIC_FILE_PRUNING_MAX_BUILD_ROWS)
+
+  def dynamicFilePruningMinFileSizeBytes: Long = getConf(DYNAMIC_FILE_PRUNING_MIN_FILE_SIZE_BYTES)
+
+  def dynamicFilePruningMaxPruneTimeMs: Long = getConf(DYNAMIC_FILE_PRUNING_MAX_PRUNE_TIME_MS)
 
   def dynamicPartitionPruningUseStats: Boolean = getConf(DYNAMIC_PARTITION_PRUNING_USE_STATS)
 
