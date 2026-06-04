@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.execution.datasources.{PruneFileSourcePartitions, PushVariantIntoScan, SchemaPruning, V1Writes}
 import org.apache.spark.sql.execution.datasources.v2.{GroupBasedRowLevelOperationScanPlanning, OptimizeMetadataOnlyDeleteFromTable, V2ScanPartitioningAndOrdering, V2ScanRelationPushDown, V2Writes}
-import org.apache.spark.sql.execution.dynamicpruning.{CleanupDynamicPruningFilters, PartitionPruning, RowLevelOperationRuntimeGroupFiltering}
+import org.apache.spark.sql.execution.dynamicpruning.{CleanupDynamicPruningFilters, DynamicFilePruning, PartitionPruning, RowLevelOperationRuntimeGroupFiltering}
 import org.apache.spark.sql.execution.python.{ExtractGroupingPythonUDFFromAggregate, ExtractPythonUDFFromAggregate, ExtractPythonUDFs, ExtractPythonUDTFs}
 
 class SparkOptimizer(
@@ -55,6 +55,7 @@ class SparkOptimizer(
     Batch("Optimize Metadata Only Query", Once, OptimizeMetadataOnlyQuery(catalog)),
     Batch("PartitionPruning", Once,
       PartitionPruning,
+      DynamicFilePruning,
       // We can't run `OptimizeSubqueries` in this batch, as it will optimize the subqueries
       // twice which may break some optimizer rules that can only be applied once. The rule below
       // only invokes `OptimizeSubqueries` to optimize newly added subqueries.
