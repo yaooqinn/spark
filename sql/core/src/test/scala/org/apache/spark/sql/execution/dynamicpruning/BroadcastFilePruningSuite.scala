@@ -18,14 +18,19 @@
 package org.apache.spark.sql.execution.dynamicpruning
 
 import org.apache.spark.sql.QueryTest
+import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
+import org.apache.spark.sql.execution.FileSourceScanExec
+import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 
 /**
  * SPARK-44662 V1 Dynamic File Pruning — P1 implementation tests.
  *
- * P1a (this batch): SQLConf registration only. Subsequent batches:
- *   - P1b: rule injection
+ * P1a: SQLConf registration only.
+ * P1b (added in this commit): rule injects DynamicPruningExpression on
+ *      BHJ over Parquet data column.
+ * Subsequent batches:
  *   - P1b-2: footer-level file prune
  *   - P1d: R1-R10 risk coverage
  */
@@ -36,4 +41,41 @@ class BroadcastFilePruningSuite extends QueryTest with SharedSparkSession {
     assert(value == "false",
       s"Expected default 'false' for ${SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key}, got '$value'")
   }
+
+  test("P1b — rule injects DynamicPruningExpression on BHJ over Parquet data col (non-AQE)") {
+    withSQLConf(
+      SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key -> "true",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "10000000") {
+      withTempPath { dir =>
+        val path = dir.getCanonicalPath
+        spark.range(1000).selectExpr("id as fact_key", "id * 2 as v")
+          .write.mode("overwrite").parquet(s"$path/fact")
+        spark.range(100, 105).selectExpr("id as dim_key")
+          .write.mode("overwrite").parquet(s"$path/dim")
+
+        val fact = spark.read.parquet(s"$path/fact")
+        val dim = spark.read.parquet(s"$path/dim")
+        val df = fact.join(dim, fact("fact_key") === dim("dim_key"))
+          .selectExpr("fact_key", "v")
+        // P1b scope: assert rule injection only; execution correctness
+        // (Parquet footer skip) is P1b-2. Don't collect() here.
+        val plan = df.queryExecution.executedPlan
+        val bhj = plan.collectFirst { case b: BroadcastHashJoinExec => b }
+        assert(bhj.isDefined, s"Expected BroadcastHashJoinExec in plan: $plan")
+        val streamSide = bhj.get.buildSide match {
+          case BuildLeft => bhj.get.right
+          case BuildRight => bhj.get.left
+        }
+        val factScan = streamSide.collectFirst { case s: FileSourceScanExec => s }
+        assert(factScan.isDefined, s"Expected FileSourceScanExec in stream side: $streamSide")
+        val hasDPE = factScan.get.dataFilters
+          .exists(_.getClass.getSimpleName == "DynamicPruningExpression")
+        assert(hasDPE,
+          s"Expected DynamicPruningExpression in scan.dataFilters when DFP enabled, " +
+            s"got: ${factScan.get.dataFilters}")
+      }
+    }
+  }
 }
+
