@@ -61,7 +61,30 @@ class DynamicFilePruningSuite extends QueryTest with SharedSparkSession {
     }
   }
 
-  // P2a-4 (F4-S1 cleanup-shape-parity) deferred to GREEN-phase regression —
+  // P2a-4 (F4-S1 cleanup-shape-parity) deferred to GREEN-phase regression -
   // a meaningful assertion requires DFP-injected DPS to exist, which only
   // happens once the rule is implemented. Will be added in P2a-GREEN commit.
+
+  test("P2b - DFP+DPP guard: partition col + data col both eligible -> exactly 1 DPS, not 2") {
+    withDfp(enabled = true) {
+      withSQLConf(SQLConf.DYNAMIC_PARTITION_PRUNING_ENABLED.key -> "true") {
+        withTempPath { dir =>
+          spark.range(1000).selectExpr("id AS k_data", "id % 4 AS k_part", "id * 2 AS v")
+            .write.partitionBy("k_part").parquet(dir.getAbsolutePath + "/fact")
+          spark.range(4).selectExpr("id AS k_data", "id AS k_part", "id + 100 AS dim")
+            .write.parquet(dir.getAbsolutePath + "/dim")
+          val fact = spark.read.parquet(dir.getAbsolutePath + "/fact")
+          val dim = spark.read.parquet(dir.getAbsolutePath + "/dim").filter("dim < 102")
+          val df = fact.join(dim, fact("k_data") === dim("k_data")
+            && fact("k_part") === dim("k_part"))
+          val optimized = df.queryExecution.optimizedPlan
+          val dpsCount = optimized.collect {
+            case p if p.expressions.exists(_.exists(_.isInstanceOf[DynamicPruningSubquery])) => p
+          }.size
+          assert(dpsCount == 1,
+            s"Expected exactly 1 DPS after DPP+DFP guard, got $dpsCount in:\n$optimized")
+        }
+      }
+    }
+  }
 }
