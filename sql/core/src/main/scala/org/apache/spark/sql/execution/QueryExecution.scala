@@ -48,7 +48,7 @@ import org.apache.spark.sql.execution.adaptive.{AdaptiveExecutionContext, Insert
 import org.apache.spark.sql.execution.bucketing.{CoalesceBucketsInJoin, DisableUnnecessaryBucketedScan}
 import org.apache.spark.sql.execution.datasources.DataSource
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Utils, TransactionalExec, V2TableRefreshUtil}
-import org.apache.spark.sql.execution.dynamicpruning.PlanDynamicPruningFilters
+import org.apache.spark.sql.execution.dynamicpruning.{InjectBroadcastFilePruningFilter, PlanDynamicPruningFilters}
 import org.apache.spark.sql.execution.exchange.EnsureRequirements
 import org.apache.spark.sql.execution.reuse.ReuseExchangeAndSubquery
 import org.apache.spark.sql.execution.streaming.checkpointing.OffsetSeqMetadata
@@ -800,6 +800,9 @@ object QueryExecution {
       PlanSubqueries(sparkSession),
       RemoveRedundantProjects,
       EnsureRequirements(),
+      // Must run AFTER EnsureRequirements: we need the BroadcastExchangeExec
+      // to already be in place on the BHJ build side so we can reuse its broadcast.
+      InjectBroadcastFilePruningFilter(sparkSession),
       // This rule must be run after `EnsureRequirements`.
       InsertSortForLimitAndOffset,
       // `ReplaceHashWithSortAgg` needs to be added after `EnsureRequirements` to guarantee the
