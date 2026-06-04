@@ -605,9 +605,6 @@ object QueryExecution {
       PlanSubqueries(sparkSession),
       RemoveRedundantProjects,
       EnsureRequirements(),
-      // Must run AFTER EnsureRequirements: we need the BroadcastExchangeExec
-      // to already be in place on the BHJ build side so we can reuse its broadcast.
-      InjectBroadcastFilePruningFilter(sparkSession),
       // This rule must be run after `EnsureRequirements`.
       InsertSortForLimitAndOffset,
       // `ReplaceHashWithSortAgg` needs to be added after `EnsureRequirements` to guarantee the
@@ -621,6 +618,10 @@ object QueryExecution {
       DisableUnnecessaryBucketedScan,
       ApplyColumnarRulesAndInsertTransitions(
         sparkSession.sessionState.columnarRules, outputsColumnar = false),
+      // Must run AFTER ApplyColumnarRulesAndInsertTransitions so that ColumnarToRow
+      // transitions are already in place; we only swap FileSourceScanExec in-place
+      // via copy(dataFilters=...), preserving the columnar contract with parents.
+      InjectBroadcastFilePruningFilter(sparkSession),
       CollapseCodegenStages()) ++
       (if (subquery) {
         Nil

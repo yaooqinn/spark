@@ -19,6 +19,8 @@ package org.apache.spark.sql.execution
 
 import java.util.concurrent.TimeUnit._
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.LogKeys.{COUNT, MAX_SPLIT_BYTES, OPEN_COST_IN_BYTES}
@@ -388,7 +390,7 @@ trait FileSourceScanLike extends DataSourceScanExec with SessionStateHelper {
     val dynamicDataFilters = dataFilters.filter(isDynamicPruningFilter)
     val dynamicPartitionFilters = partitionFilters.filter(isDynamicPruningFilter)
 
-    if (dynamicPartitionFilters.nonEmpty) {
+    val partitionPruned: ScanFileListing = if (dynamicPartitionFilters.nonEmpty) {
       val startTime = System.nanoTime()
       // call the file index for the files matching all filters except dynamic partition filters
       val predicate = dynamicPartitionFilters.reduce(And)
@@ -407,6 +409,111 @@ trait FileSourceScanLike extends DataSourceScanExec with SessionStateHelper {
     } else {
       selectedPartitions
     }
+
+    // SPARK-44662 P1b-2: file-level skipping via Parquet footer min/max for
+    // DynamicPruningExpression on data columns (injected by
+    // InjectBroadcastFilePruningFilter).
+    if (conf.dynamicFilePruningEnabled && dynamicDataFilters.nonEmpty) {
+      val startTime = System.nanoTime()
+      val pruned = applyBroadcastFilePruning(partitionPruned, dynamicDataFilters)
+      setFilesNumAndSizeMetric(pruned, false)
+      val timeTakenMs = NANOSECONDS.toMillis(System.nanoTime() - startTime)
+      driverMetrics.get("pruningTime").foreach(m => m.set(m.value + timeTakenMs))
+      pruned
+    } else {
+      partitionPruned
+    }
+  }
+
+  /**
+   * Drop files whose Parquet footer min/max range excludes every broadcast build key.
+   * Only Parquet V1 is supported; other formats are a no-op.
+   */
+  private def applyBroadcastFilePruning(
+      input: ScanFileListing,
+      dynamicDataFilters: Seq[Expression]): ScanFileListing = {
+    // Extract (column-attr, broadcast-key-set) pairs from DPE filters.
+    val keysByAttr = dynamicDataFilters.flatMap {
+      case DynamicPruningExpression(in: InSubqueryExec) =>
+        in.values().filter(_.nonEmpty).map(keys => (in.child, keys))
+      case _ => None
+    }
+    if (keysByAttr.isEmpty) return input
+    val isParquet = relation.fileFormat.getClass.getSimpleName.contains("Parquet")
+    if (!isParquet) return input
+
+    val hadoopConf = relation.sparkSession.sessionState.newHadoopConfWithOptions(
+      relation.options)
+    val confBroadcast = relation.sparkSession.sparkContext.broadcast(
+      new org.apache.spark.util.SerializableConfiguration(hadoopConf))
+
+    // For each (attr, keys), determine the data type and pruning predicate.
+    // Single-key only (P1b restriction); multi-attr DPE means files must
+    // intersect ALL build-key sets.
+    val prunePreds: Seq[(String, Any => Boolean)] = keysByAttr.flatMap {
+      case (attr: AttributeReference, keys) =>
+        val keySet = keys.filter(_ != null).toSet
+        if (keySet.isEmpty) None
+        else Some((attr.name, (v: Any) => keySet.contains(v)))
+      case _ => None
+    }
+    if (prunePreds.isEmpty) return input
+
+    def fileSurvives(filePath: String): Boolean = {
+      try {
+        val path = new org.apache.hadoop.fs.Path(filePath)
+        val conf = confBroadcast.value.value
+        val inputFile = org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(path, conf)
+        val opts = org.apache.parquet.HadoopReadOptions.builder(conf, path).build()
+        val reader = org.apache.parquet.hadoop.ParquetFileReader.open(inputFile, opts)
+        try {
+          val footer = reader.getFooter
+          val schema = footer.getFileMetaData.getSchema
+          prunePreds.forall { case (colName, predicate) =>
+            val colIdx = schema.getFields.asScala.indexWhere(_.getName == colName)
+            if (colIdx < 0) true
+            else {
+              val blocks = footer.getBlocks.asScala
+              // File survives if ANY row-group's [min, max] range overlaps a key.
+              blocks.exists { rg =>
+                val col = rg.getColumns.asScala.find(_.getPath.toDotString == colName)
+                col.flatMap(c => Option(c.getStatistics)) match {
+                  case Some(stats) if !stats.isEmpty && stats.hasNonNullValue =>
+                    val mn: Any = stats.genericGetMin()
+                    val mx: Any = stats.genericGetMax()
+                    // Cheap path: if a key falls in [min, max], keep. We can't
+                    // iterate the key set per-block (cost), so use bracket overlap.
+                    keysByAttr.exists { case (a, keys) =>
+                      val attrName = a match {
+                        case ar: AttributeReference => ar.name
+                        case _ => ""
+                      }
+                      if (attrName != colName) false
+                      else keys.exists { k =>
+                        try {
+                          val kc = k.asInstanceOf[Comparable[Any]]
+                          kc.compareTo(mn) >= 0 && kc.compareTo(mx) <= 0
+                        } catch { case _: Throwable => true }
+                      }
+                    }
+                  case _ => true // no stats — must keep
+                }
+              }
+            }
+          }
+        } finally reader.close()
+      } catch {
+        case _: Throwable => true // any I/O error: be safe, keep the file
+      }
+    }
+
+    // Rebuild the file listing dropping files that fail fileSurvives.
+    val origDirs = input.asInstanceOf[GenericScanFileListing].partitionDirectories
+    val prunedDirs = origDirs.map { pd =>
+      val keptFiles = pd.files.filter(f => fileSurvives(f.getPath.toString))
+      PartitionDirectory(pd.values, keptFiles)
+    }
+    GenericScanFileListing(prunedDirs)
   }
 
   private def toAttribute(colName: String): Option[Attribute] =

@@ -77,5 +77,46 @@ class BroadcastFilePruningSuite extends QueryTest with SharedSparkSession {
       }
     }
   }
+
+  test("P1b-2 — DFP skips Parquet files whose footer min/max exclude all build keys") {
+    withSQLConf(
+      SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key -> "true",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "10000000",
+      SQLConf.FILES_MAX_PARTITION_BYTES.key -> "1024") {
+      withTempPath { dir =>
+        val path = dir.getCanonicalPath
+        // Write fact as 4 separate files with disjoint key ranges:
+        // file 0: 0-249, file 1: 250-499, file 2: 500-749, file 3: 750-999.
+        // Each file gets its own footer min/max bracket.
+        (0 until 4).foreach { i =>
+          val lo = i * 250
+          val hi = lo + 250
+          spark.range(lo, hi).selectExpr("id as fact_key", "id * 2 as v")
+            .coalesce(1)
+            .write.mode("append").parquet(s"$path/fact")
+        }
+        // dim only contains keys in file 1's bracket [250, 499].
+        spark.range(300, 305).selectExpr("id as dim_key")
+          .write.mode("overwrite").parquet(s"$path/dim")
+
+        val fact = spark.read.parquet(s"$path/fact")
+        val dim = spark.read.parquet(s"$path/dim")
+        val df = fact.join(dim, fact("fact_key") === dim("dim_key"))
+          .selectExpr("fact_key", "v")
+        df.collect()
+
+        val plan = df.queryExecution.executedPlan
+        val factScan = plan.collectFirst { case s: FileSourceScanExec
+          if s.relation.location.rootPaths.head.toString.contains("/fact") => s }.get
+        // numFiles metric should reflect files surviving DFP pruning.
+        // Without DFP: all 4 files read. With DFP: only file 1 (keys 250-499) survives.
+        val numFilesMetric = factScan.metrics("numFiles").value
+        assert(numFilesMetric < 4,
+          s"Expected DFP to skip at least one of 4 fact files (build keys 300-304 " +
+            s"only intersect 1 file), but numFiles=$numFilesMetric")
+      }
+    }
+  }
 }
 
