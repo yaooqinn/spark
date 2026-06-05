@@ -411,8 +411,9 @@ trait FileSourceScanLike extends DataSourceScanExec with SessionStateHelper {
     }
 
     // SPARK-44662 P1b-2: file-level skipping via Parquet footer min/max for
-    // DynamicPruningExpression on data columns (injected by
-    // InjectBroadcastFilePruningFilter).
+    // DynamicPruningExpression on data columns (injected by DynamicFilePruning
+    // logical rule, then moved into dataFilters by PushDpeToFileScan AQE-stage
+    // rule per design rev 7).
     if (conf.dynamicFilePruningEnabled && dynamicDataFilters.nonEmpty) {
       val startTime = System.nanoTime()
       val pruned = applyBroadcastFilePruning(partitionPruned, dynamicDataFilters)

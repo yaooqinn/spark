@@ -271,4 +271,10 @@ class DynamicFilePruningSuite extends QueryTest with SharedSparkSession
       }
     }
   }
+
+  test("P2d-1 (former P1a) - DYNAMIC_FILE_PRUNING_ENABLED conf registered, defaults to false") {
+    val value = spark.conf.get(SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key)
+    assert(value == "false",
+      s"Expected default 'false' for ${SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key}, got '$value'")
+  }
 }

@@ -43,7 +43,7 @@ import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.execution.adaptive.{AdaptiveExecutionContext, InsertAdaptiveSparkPlan}
 import org.apache.spark.sql.execution.bucketing.{CoalesceBucketsInJoin, DisableUnnecessaryBucketedScan}
 import org.apache.spark.sql.execution.datasources.v2.V2TableRefreshUtil
-import org.apache.spark.sql.execution.dynamicpruning.{InjectBroadcastFilePruningFilter, PlanDynamicPruningFilters}
+import org.apache.spark.sql.execution.dynamicpruning.PlanDynamicPruningFilters
 import org.apache.spark.sql.execution.exchange.EnsureRequirements
 import org.apache.spark.sql.execution.reuse.ReuseExchangeAndSubquery
 import org.apache.spark.sql.execution.streaming.checkpointing.OffsetSeqMetadata
@@ -618,10 +618,6 @@ object QueryExecution {
       DisableUnnecessaryBucketedScan,
       ApplyColumnarRulesAndInsertTransitions(
         sparkSession.sessionState.columnarRules, outputsColumnar = false),
-      // Must run AFTER ApplyColumnarRulesAndInsertTransitions so that ColumnarToRow
-      // transitions are already in place; we only swap FileSourceScanExec in-place
-      // via copy(dataFilters=...), preserving the columnar contract with parents.
-      InjectBroadcastFilePruningFilter(sparkSession),
       CollapseCodegenStages()) ++
       (if (subquery) {
         Nil
