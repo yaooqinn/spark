@@ -143,6 +143,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.optimizer.EvalInlineTables" ::
       "org.apache.spark.sql.catalyst.optimizer.GenerateOptimization" ::
       "org.apache.spark.sql.catalyst.optimizer.InferWindowGroupLimit" ::
+      "org.apache.spark.sql.catalyst.optimizer.InferUniqueDistinctToSemi" ::
       "org.apache.spark.sql.catalyst.optimizer.LikeSimplification" ::
       "org.apache.spark.sql.catalyst.optimizer.LimitPushDown" ::
       "org.apache.spark.sql.catalyst.optimizer.LimitPushDownThroughWindow" ::
