@@ -158,6 +158,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.optimizer.OptimizeUpdateFields"::
       "org.apache.spark.sql.catalyst.optimizer.OptimizeWindowFunctions" ::
       "org.apache.spark.sql.catalyst.optimizer.Optimizer$OptimizeSubqueries" ::
+      "org.apache.spark.sql.catalyst.optimizer.PullUpJoinFromUnion" ::
       "org.apache.spark.sql.catalyst.optimizer.PropagateEmptyRelation" ::
       "org.apache.spark.sql.catalyst.optimizer.PruneFilters" ::
       "org.apache.spark.sql.catalyst.optimizer.PushDownJoinThroughUnion" ::

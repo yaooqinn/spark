@@ -803,6 +803,15 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val PULL_UP_JOIN_FROM_UNION_ENABLED =
+    buildConf("spark.sql.optimizer.pullUpJoinFromUnion.enabled")
+      .doc("When true, collapses inner Aggregates that sit on each branch of a Union " +
+        "below a top-level Aggregate, so the outer Aggregate sees raw rows. Safe only " +
+        "for plain SUM/COUNT aggregates over deterministic, subquery-free arguments.")
+      .version("4.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
   val EXPRESSION_PROJECTION_CANDIDATE_LIMIT =
     buildConf("spark.sql.optimizer.expressionProjectionCandidateLimit")
       .doc("The maximum number of the candidate of output expressions whose alias are replaced." +

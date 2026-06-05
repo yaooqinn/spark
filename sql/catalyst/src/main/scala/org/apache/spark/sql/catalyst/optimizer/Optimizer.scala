@@ -242,10 +242,11 @@ abstract class Optimizer(catalogManager: CatalogManager)
     // idempotence enforcement on this batch. We thus make it FixedPoint(1) instead of Once.
     Batch("Join Reorder", FixedPoint(1),
       CostBasedJoinReorder),
-    // Must run after "Early Filter and Projection Push-Down" because it relies on
-    // accurate stats (e.g., DSv2 relations only report stats after V2ScanRelationPushDown).
-    // Runs after Join Reorder so that cost-based join reordering can optimize the full join graph
-    // before this rule breaks it into per-Union-branch joins.
+    // Pull Up Join From Union runs after Join Reorder so that CBO has already
+    // reordered joins inside each Union branch, and before PushDownJoinThroughUnion
+    // so the downstream rule sees a single collapsed branch shape.
+    Batch("Pull Up Join From Union", Once,
+      PullUpJoinFromUnion(conf)),
     Batch("Push Down Join Through Union", Once,
       PushDownJoinThroughUnion(conf)),
     Batch("Eliminate Sorts", Once,
