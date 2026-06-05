@@ -136,6 +136,7 @@ case class AdaptiveSparkPlanExec(
   // optimizations should be stage-independent.
   @transient private val queryStageOptimizerRules: Seq[Rule[SparkPlan]] = Seq(
     PlanAdaptiveDynamicPruningFilters(this),
+    PushDpeToFileScan,
     ReuseAdaptiveSubquery(context.subqueryCache),
     OptimizeSkewInRebalancePartitions,
     CoalesceShufflePartitions(context.session),
