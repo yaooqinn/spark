@@ -25,7 +25,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 
 /**
- * SPARK-44662 V1 Dynamic File Pruning — P1 implementation tests.
+ * SPARK-44662 V1 Dynamic File Pruning - P1 implementation tests.
  *
  * P1a: SQLConf registration only.
  * P1b (added in this commit): rule injects DynamicPruningExpression on
@@ -36,13 +36,13 @@ import org.apache.spark.sql.test.SharedSparkSession
  */
 class BroadcastFilePruningSuite extends QueryTest with SharedSparkSession {
 
-  test("P1a — DYNAMIC_FILE_PRUNING_ENABLED conf registered and defaults to false") {
+  test("P1a - DYNAMIC_FILE_PRUNING_ENABLED conf registered and defaults to false") {
     val value = spark.conf.get(SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key)
     assert(value == "false",
       s"Expected default 'false' for ${SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key}, got '$value'")
   }
 
-  test("P1b — rule injects DynamicPruningExpression on BHJ over Parquet data col (non-AQE)") {
+  test("P1b - rule injects DynamicPruningExpression on BHJ over Parquet data col (non-AQE)") {
     withSQLConf(
       SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key -> "true",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
@@ -78,7 +78,7 @@ class BroadcastFilePruningSuite extends QueryTest with SharedSparkSession {
     }
   }
 
-  test("P1b-2 — DFP skips Parquet files whose footer min/max exclude all build keys") {
+  test("P1b-2 - DFP skips Parquet files whose footer min/max exclude all build keys") {
     withSQLConf(
       SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key -> "true",
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",

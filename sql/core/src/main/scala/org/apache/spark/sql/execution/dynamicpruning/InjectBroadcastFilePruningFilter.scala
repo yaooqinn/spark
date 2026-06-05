@@ -30,7 +30,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
 /**
- * SPARK-44662 — Dynamic File Pruning for non-partition data columns.
+ * SPARK-44662 - Dynamic File Pruning for non-partition data columns.
  *
  * This rule is the data-column sibling of [[PlanDynamicPruningFilters]] (non-AQE).
  * When a BroadcastHashJoin's stream side reads from a file-based scan
@@ -51,8 +51,8 @@ case class InjectBroadcastFilePruningFilter(sparkSession: SparkSession)
   override def conf: SQLConf = sparkSession.sessionState.conf
 
   /**
-   * Eligible data types — pruning column must have totally-ordered footer stats
-   * consistent with JVM `Comparable` (design D3 §type system).
+   * Eligible data types - pruning column must have totally-ordered footer stats
+   * consistent with JVM `Comparable` (design D3 -type system).
    */
   private def isEligibleType(dt: DataType): Boolean = dt match {
     case _: ByteType | _: ShortType | _: IntegerType | _: LongType => true
@@ -70,10 +70,10 @@ case class InjectBroadcastFilePruningFilter(sparkSession: SparkSession)
     }
     plan.transformUp {
       case bhj @ BroadcastHashJoinExec(
-          leftKeys, rightKeys, _, buildSide, _, left, right, _, _) =>
+          leftKeys, rightKeys, _, buildSide, _, left, right, _) =>
         val (streamKeys, buildKeys, streamSide, buildSidePlan) = buildSide match {
           case BuildRight => (leftKeys, rightKeys, left, right)
-          case BuildLeft  => (rightKeys, leftKeys, right, left)
+          case BuildLeft => (rightKeys, leftKeys, right, left)
         }
         if (streamKeys.length != 1 || buildKeys.length != 1) {
           bhj
@@ -123,7 +123,7 @@ case class InjectBroadcastFilePruningFilter(sparkSession: SparkSession)
           }
           buildSide match {
             case BuildRight => bhj.copy(left = newStreamSide)
-            case BuildLeft  => bhj.copy(right = newStreamSide)
+            case BuildLeft => bhj.copy(right = newStreamSide)
           }
         }
     }

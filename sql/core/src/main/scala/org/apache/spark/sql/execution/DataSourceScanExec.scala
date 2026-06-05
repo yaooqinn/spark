@@ -496,7 +496,7 @@ trait FileSourceScanLike extends DataSourceScanExec with SessionStateHelper {
                         } catch { case _: Throwable => true }
                       }
                     }
-                  case _ => true // no stats — must keep
+                  case _ => true // no stats - must keep
                 }
               }
             }
