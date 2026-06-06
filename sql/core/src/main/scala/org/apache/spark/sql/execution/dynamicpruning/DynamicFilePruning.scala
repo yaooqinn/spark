@@ -97,6 +97,9 @@ object DynamicFilePruning extends Rule[LogicalPlan]
    * DPE(TrueLiteral) when no BHJ reuse can be found, which
    * DataSourceScanExec.isDynamicPruningFilter filters out before footer-read
    * (F-S1 invariant test). No subquery duplication ever.
+   *
+   * isFileFilter=true so InjectRuntimeFilter.hasDynamicPruningSubquery
+   * mutex excludes DFP-injected DPS - BF coexists with DFP on the same scan.
    */
   private def insertPredicate(
       pruningKey: Expression,
@@ -112,7 +115,8 @@ object DynamicFilePruning extends Rule[LogicalPlan]
         filteringPlan,
         joinKeys,
         indices,
-        onlyInBroadcast = true),
+        onlyInBroadcast = true,
+        isFileFilter = true),
       pruningPlan)
   }
 

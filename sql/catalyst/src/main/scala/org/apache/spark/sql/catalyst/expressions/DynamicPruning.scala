@@ -38,6 +38,16 @@ trait DynamicPruning extends Predicate
  *  broadcast through ReuseExchange; otherwise, it will use the filter only if it
  *  can reuse the results of the broadcast through ReuseExchange
  * @param broadcastKeyIndices the indices of the filtering keys collected from the broadcast
+ * @param isFileFilter true when injected by [[org.apache.spark.sql.execution.dynamicpruning
+ *  .DynamicFilePruning]] (SPARK-44662), which prunes data files / row-groups; false (default) for
+ *  [[org.apache.spark.sql.execution.dynamicpruning.PartitionPruning]] which prunes partitions.
+ *  The two semantics are orthogonal:
+ *   - DPP (isFileFilter=false) skips entire partitions => strictly stronger than runtime BF =>
+ *     [[org.apache.spark.sql.catalyst.optimizer.InjectRuntimeFilter]] mutex-excludes the same key.
+ *   - DFP (isFileFilter=true) skips files/row-groups within partitions => orthogonal to BF row
+ *     skip => coexists with BF on the same key (BF mutex check ignores isFileFilter=true rows).
+ *  Discriminator added to avoid case-class extension (final case class), preserving binary-compat
+ *  via default-false param (DPP construction sites unchanged).
  */
 case class DynamicPruningSubquery(
     pruningKey: Expression,
@@ -46,7 +56,8 @@ case class DynamicPruningSubquery(
     broadcastKeyIndices: Seq[Int],
     onlyInBroadcast: Boolean,
     exprId: ExprId = NamedExpression.newExprId,
-    hint: Option[HintInfo] = None)
+    hint: Option[HintInfo] = None,
+    isFileFilter: Boolean = false)
   extends SubqueryExpression(buildQuery, Seq(pruningKey), exprId, Seq.empty, hint)
   with DynamicPruning
   with Unevaluable

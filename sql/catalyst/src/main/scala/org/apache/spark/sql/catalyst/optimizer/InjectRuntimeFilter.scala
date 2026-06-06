@@ -249,7 +249,11 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
     }
   }
 
-  // This checks if there is already a DPP filter, as this rule is called just after DPP.
+  // This checks if there is already a DPP filter (NOT DFP) on the key, as this rule is called
+  // just after DPP. DFP (SPARK-44662, isFileFilter=true) is intentionally excluded: it prunes
+  // files/row-groups (orthogonal to BF row skip) and is meant to coexist with BF on the same
+  // key. Only DPP (isFileFilter=false, the original partition-pruning sibling) is strictly
+  // stronger than BF and triggers the mutex.
   @tailrec
   private def hasDynamicPruningSubquery(
       left: LogicalPlan,
@@ -257,11 +261,19 @@ object InjectRuntimeFilter extends Rule[LogicalPlan] with PredicateHelper with J
       leftKey: Expression,
       rightKey: Expression): Boolean = {
     (left, right) match {
-      case (Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _), plan), _) =>
+      case (Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _, isFileFilter), plan), _)
+          if !isFileFilter =>
         pruningKey.fastEquals(leftKey) || hasDynamicPruningSubquery(plan, right, leftKey, rightKey)
-      case (_, Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _), plan)) =>
+      case (_, Filter(DynamicPruningSubquery(pruningKey, _, _, _, _, _, _, isFileFilter), plan))
+          if !isFileFilter =>
         pruningKey.fastEquals(rightKey) ||
           hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
+      // Filter with DFP-flagged DPS: skip the DFP-bearing Filter and keep searching under it
+      // for any DPP-bearing Filter further down. Both left and right tree positions handled.
+      case (Filter(DynamicPruningSubquery(_, _, _, _, _, _, _, true), plan), _) =>
+        hasDynamicPruningSubquery(plan, right, leftKey, rightKey)
+      case (_, Filter(DynamicPruningSubquery(_, _, _, _, _, _, _, true), plan)) =>
+        hasDynamicPruningSubquery(left, plan, leftKey, rightKey)
       case _ => false
     }
   }

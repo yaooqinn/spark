@@ -272,6 +272,46 @@ class DynamicFilePruningSuite extends QueryTest with SharedSparkSession
     }
   }
 
+  test("P2f-1 - BF coexists with DFP on the same fact-table scan (no mutex collision)") {
+    // Regression for DFP-on suppressing InjectRuntimeFilter BF via
+    // DynamicPruningSubquery mutex at InjectRuntimeFilter.scala (hasDynamicPruningSubquery).
+    // Fix: isFileFilter discriminator on DPS; BF mutex excludes DFP-flagged entries.
+    // RED: with the bug present, plan has 0 might_contain tokens (BF suppressed).
+    // GREEN post-fix: plan has BOTH DPS (DFP) AND might_contain (BF) on fact scan.
+    //
+    // BF gate requires isProbablyShuffleJoin OR shuffle below the join. We set
+    // autoBroadcastJoinThreshold=1B so both fact and dim are too big to broadcast
+    // (forcing SMJ = shuffle join), and lower the application-side scan-size
+    // threshold so the small synthetic fact qualifies.
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key -> "true",
+      // Force shuffle join (both sides above BHJ threshold) so BF gate
+      // isProbablyShuffleJoin returns true.
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "1",
+      SQLConf.RUNTIME_BLOOM_FILTER_ENABLED.key -> "true",
+      // Lower application-side byte-size requirement so small synthetic fact
+      // qualifies for BF injection.
+      SQLConf.RUNTIME_BLOOM_FILTER_APPLICATION_SIDE_SCAN_SIZE_THRESHOLD.key -> "1") {
+      withTempPath { dir =>
+        spark.range(10000).selectExpr("id AS k", "id % 100 AS v")
+          .write.parquet(dir.getAbsolutePath + "/fact")
+        spark.range(100).selectExpr("id AS k", "id + 1 AS dim")
+          .write.parquet(dir.getAbsolutePath + "/dim")
+        val fact = spark.read.parquet(dir.getAbsolutePath + "/fact")
+        val dim = spark.read.parquet(dir.getAbsolutePath + "/dim").filter("dim < 50")
+        val joined = fact.join(dim, "k")
+        val optimized = joined.queryExecution.optimizedPlan.toString
+        // P2f assertion: DFP and BF must coexist after the fix.
+        val hasDfp = optimized.contains("dynamicpruning#")
+        val hasBf = optimized.contains("might_contain")
+        assert(hasDfp, s"DFP expected to inject DynamicPruningSubquery; plan: $optimized")
+        assert(hasBf,
+          s"BF expected to inject might_contain (mutex collision with DFP fixed); plan: $optimized")
+      }
+    }
+  }
+
   test("P2d-1 (former P1a) - DYNAMIC_FILE_PRUNING_ENABLED conf registered, defaults to false") {
     val value = spark.conf.get(SQLConf.DYNAMIC_FILE_PRUNING_ENABLED.key)
     assert(value == "false",
