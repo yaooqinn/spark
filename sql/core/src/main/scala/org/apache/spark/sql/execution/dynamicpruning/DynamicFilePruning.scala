@@ -28,8 +28,7 @@ import org.apache.spark.sql.types._
 /**
  * SPARK-44662 - DynamicFilePruning intentionally mirrors PartitionPruning
  * (sql/core/.../dynamicpruning/PartitionPruning.scala L53-281), diverging at
- * three points documented in design rev 4 (features/spark-dynamic-file-pruning/
- * docs/0002-decision.md):
+ * three points documented below:
  *   D1. getFilterableTableScan accepts type-eligible non-partition data cols
  *       (V1 HadoopFsRelation only in v1; Hive + DSv2 deferred)
  *   D2. v1 pruningHasBenefit reuses DPP formula, forces onlyInBroadcast=true
@@ -120,6 +119,36 @@ object DynamicFilePruning extends Rule[LogicalPlan]
       pruningPlan)
   }
 
+  /**
+   * Gate DPS injection on the application-side target's file count.
+   *
+   * The "application-side" scan here is `filterableScan`, the value returned
+   * by `getFilterableTableScan(pruningKey, pruningPlan)` - the LogicalRelation
+   * that DPS would prune (the probe-side fact-table candidate). It is NOT the
+   * build-side (broadcast subquery input).
+   *
+   * When the application-side scan has at most `applicationSideMinFiles`
+   * files (default 1, -1 disables), the prune ceiling is 0 and the
+   * injection cost (Catalyst planning + broadcast subquery build + AQE
+   * wait) cannot be recovered. Skip insertPredicate for that key.
+   *
+   * IMPORTANT: do NOT walk the `pruningPlan` subtree with
+   * `collectFirst[LogicalRelation]` here. The subtree can contain
+   * unrelated joined tables (e.g. 1-file dims in a sibling sub-join)
+   * and `collectFirst` will hit them first, causing the gate to skip
+   * DPS injection on multi-file facts. Always check `filterableScan`
+   * directly, which is already the precise target LogicalRelation.
+   */
+  private def shouldSkipByFileCount(scan: LogicalPlan): Boolean = {
+    val minFiles = conf.dynamicFilePruningApplicationSideMinFiles
+    if (minFiles < 0) return false
+    scan match {
+      case LogicalRelation(h: HadoopFsRelation, _, _, _, _) =>
+        h.location.inputFiles.length <= minFiles
+      case _ => false
+    }
+  }
+
   private def prune(plan: LogicalPlan): LogicalPlan = {
     plan transformUp {
       // guard against double-injecting on top of DPP or a prior DFP visit
@@ -150,11 +179,15 @@ object DynamicFilePruning extends Rule[LogicalPlan]
               (b, a)
             }
             var filterableScan = getFilterableTableScan(l, left)
-            if (filterableScan.isDefined && canPruneLeft(joinType) && hasPruningFilter(right)) {
+            if (filterableScan.isDefined && canPruneLeft(joinType)
+                && hasPruningFilter(right)
+                && !shouldSkipByFileCount(filterableScan.get)) {
               newLeft = insertPredicate(l, newLeft, Seq(r), right, rightKeys)
             } else {
               filterableScan = getFilterableTableScan(r, right)
-              if (filterableScan.isDefined && canPruneRight(joinType) && hasPruningFilter(left)) {
+              if (filterableScan.isDefined && canPruneRight(joinType)
+                  && hasPruningFilter(left)
+                  && !shouldSkipByFileCount(filterableScan.get)) {
                 newRight = insertPredicate(r, newRight, Seq(l), left, leftKeys)
               }
             }

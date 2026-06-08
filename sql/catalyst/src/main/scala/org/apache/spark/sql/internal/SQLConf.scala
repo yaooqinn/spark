@@ -638,6 +638,20 @@ object SQLConf {
       .checkValue(_ > 0, "must be positive")
       .createWithDefault(5000)
 
+  val DYNAMIC_FILE_PRUNING_APPLICATION_SIDE_MIN_FILES =
+    buildConf("spark.sql.optimizer.dynamicFilePruning.applicationSideMinFiles")
+      .doc("When dynamic file pruning is enabled and the application-side scan " +
+        "of a candidate join has at most this many files, the rule skips " +
+        "injecting the DynamicPruningSubquery on that key. The prune ceiling " +
+        "is 0 in that case, and the injection cost (Catalyst planning, " +
+        "broadcast subquery build, and AQE coordination) cannot be recovered. " +
+        "The check uses the precise filterable LogicalRelation returned by " +
+        "the rule, not a subtree walk, to avoid over-skipping when a sibling " +
+        "join contains a small dimension. Set -1 to disable.")
+      .version("4.2.0")
+      .intConf
+      .createWithDefault(1)
+
 
   val DYNAMIC_PARTITION_PRUNING_USE_STATS =
     buildConf("spark.sql.optimizer.dynamicPartitionPruning.useStats")
@@ -6875,6 +6889,9 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
   def dynamicFilePruningMinFileSizeBytes: Long = getConf(DYNAMIC_FILE_PRUNING_MIN_FILE_SIZE_BYTES)
 
   def dynamicFilePruningMaxPruneTimeMs: Long = getConf(DYNAMIC_FILE_PRUNING_MAX_PRUNE_TIME_MS)
+
+  def dynamicFilePruningApplicationSideMinFiles: Int =
+    getConf(DYNAMIC_FILE_PRUNING_APPLICATION_SIDE_MIN_FILES)
 
   def dynamicPartitionPruningUseStats: Boolean = getConf(DYNAMIC_PARTITION_PRUNING_USE_STATS)
 
